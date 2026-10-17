@@ -1257,37 +1257,75 @@ async function segBlob(sess, seg){
   await DB.putSeg({sessionId:sess.id, idx:seg.idx, t0:seg.t0, dur:seg.dur, mime:seg.mime, blob, up:true, cachedAt:Date.now()});
   return blob;
 }
+// iPad：只有手指点的那一下才允许开始播放。读文件、下载都要时间，等好了再 play() 会被拒，
+// 所以点的当下先用一小段静音把播放器"解锁"，之后换文件再播就不受限制
+let silentUrl = null;
+function plUnlock(){
+  if (P.unlocked) return; P.unlocked = true;
+  const a = $('#player');
+  if (!silentUrl) silentUrl = URL.createObjectURL(encodeWav([new Float32Array(1600)], 1600, 16000));
+  a.src = silentUrl; a.play().then(() => a.pause()).catch(() => {});
+}
+function loadSrc(a, url){
+  return new Promise((res, rej) => {
+    const done = (f, x) => { clearTimeout(tm); a.onloadedmetadata = a.onerror = null; f(x); };
+    const tm = setTimeout(() => done(res, false), 6000);   // iPad 常常不预加载，等不到就直接播
+    a.onloadedmetadata = () => done(res, true);
+    a.onerror = () => done(rej, a.error);
+    a.src = url; a.load();
+  });
+}
+async function blobInfo(b){
+  const h = new Uint8Array(await b.slice(0, 12).arrayBuffer());
+  return `${Math.round(b.size / 1024)}KB ${b.type || '无类型'} 文件头 ${[...h].map(x => x >= 32 && x < 127 ? String.fromCharCode(x) : '.').join('')}`;
+}
+// 先读进内存再交给播放器（iPad 直接播本机数据库里的音频会报"不支持"）；还不行就转成内嵌数据再试
+async function plLoad(a, blob, type){
+  const mem = new Blob([await blob.arrayBuffer()], {type});
+  if (P.url) URL.revokeObjectURL(P.url);
+  P.url = URL.createObjectURL(mem);
+  try { return await loadSrc(a, P.url); }
+  catch(err1){
+    log(`播放：方式一失败（错误码 ${err1 && err1.code}），${await blobInfo(mem)}`);
+    const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr.readAsDataURL(mem); });
+    try { return await loadSrc(a, data); }
+    catch(err2){
+      const msg = (err2 && err2.message) || '';
+      log(`播放：方式二也失败（错误码 ${err2 && err2.code}${msg ? '，' + msg : ''}）`);
+      throw new Error('录音文件打不开（错误码 ' + (err2 && err2.code) + '）。可以试试"导出录音"，看文件 App 能不能播');
+    }
+  }
+}
 async function plAt(t, play = true){
   const segs = P.segs; if (!segs.length) return;
   let i = segs.findIndex(s => t < s.t0 + s.dur); if (i < 0) i = segs.length - 1;
   const seg = segs[i], a = $('#player'), sess = P.sess;
+  const off = Math.max(0, t - seg.t0);
+  const seek = () => { try { a.currentTime = seg.dur >= 1 ? Math.min(off, seg.dur - 0.2) : off; } catch(e){} };
   try {
     if (P.i !== i){
       const blob = await segBlob(sess, seg);
       if (P.sess !== sess) return;   // 下载期间关掉了
-      if (P.url) URL.revokeObjectURL(P.url);
-      P.url = URL.createObjectURL(blob); P.i = i;
-      a.src = P.url;
-      await new Promise((res, rej) => {
-        a.onloadedmetadata = res;
-        a.onerror = () => rej(new Error('录音文件打不开（错误码 ' + (a.error ? a.error.code : '?') + '）'));
-      });
+      P.i = -1;
+      const loaded = await plLoad(a, blob, seg.mime);
+      P.i = i;
       // 时长不知道的（意外中断的老录音）用文件自己的
-      if (seg.dur < 1 && isFinite(a.duration)){ seg.dur = a.duration; P.total = Math.max(P.total, seg.t0 + seg.dur); $('#plBar').max = P.total; }
+      const fixDur = () => { if (seg.dur < 1 && isFinite(a.duration)){ seg.dur = a.duration; P.total = Math.max(P.total, seg.t0 + seg.dur); $('#plBar').max = P.total; } };
+      if (loaded) fixDur();
+      else a.addEventListener('loadedmetadata', () => { fixDur(); seek(); }, {once:true});
     }
-    const off = Math.max(0, t - seg.t0);
-    a.currentTime = seg.dur >= 1 ? Math.min(off, seg.dur - 0.2) : off;
+    seek();
     if (play) await a.play();
-  } catch(e){ toast(e.message); log('播放：' + e.message); }
+  } catch(e){ toast(e.message, 6000); log('播放：' + e.message); }
   plShow();
 }
 (() => {
   const a = $('#player');
   ['timeupdate', 'play', 'pause'].forEach(ev => a.addEventListener(ev, plShow));
-  a.addEventListener('ended', () => { if (P.i + 1 < P.segs.length) plAt(P.segs[P.i + 1].t0); else plShow(); });   // 一段播完接下一段
-  $('#plBtn').onclick = () => { if (!P.segs.length) return; if (P.i < 0) plAt(0); else if (a.paused) a.play().catch(e => toast(e.message)); else a.pause(); };
+  a.addEventListener('ended', () => { if (P.i >= 0 && P.i + 1 < P.segs.length) plAt(P.segs[P.i + 1].t0); else plShow(); });   // 一段播完接下一段
+  $('#plBtn').onclick = () => { if (!P.segs.length) return; if (P.i < 0){ plUnlock(); plAt(+$('#plBar').value || 0); } else if (a.paused) a.play().catch(e => toast(e.message)); else a.pause(); };
   $('#plBar').oninput = () => { P.seeking = true; $('#plTime').textContent = fmtT(+$('#plBar').value) + ' / ' + fmtT(P.total); };
-  $('#plBar').onchange = () => { P.seeking = false; plAt(+$('#plBar').value, P.i < 0 || !a.paused); };
+  $('#plBar').onchange = () => { P.seeking = false; const play = P.i < 0 || !a.paused; if (play) plUnlock(); plAt(+$('#plBar').value, play); };
 })();
 
 let curSess = null;
@@ -1314,6 +1352,7 @@ async function openSession(id){
     if (!P.segs.length) return;
     const l = curSess.lines[+el.dataset.i];
     box.querySelectorAll('.playing').forEach(x => x.classList.remove('playing')); el.classList.add('playing');
+    plUnlock();
     plAt(Math.max(0, l.t - 0.3));
   });
   openPanel('#pSession');
