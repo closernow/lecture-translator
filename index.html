@@ -196,6 +196,12 @@ a{color:#7fb7ff}
       <h3>存储</h3>
       <div class="hint" id="storageInfo"></div>
     </div>
+
+    <div class="sec">
+      <h3>运行日志</h3>
+      <div class="hint">最新的在最上面。卡住或出错时截图这里。</div>
+      <pre id="logBox" style="white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.5;color:var(--muted);max-height:50vh;overflow-y:auto;margin:8px 0 0"></pre>
+    </div>
   </div>
 </div>
 
@@ -415,8 +421,10 @@ async function transcribe(wav, prompt){
       fd.append('response_format', 'verbose_json');
       fd.append('temperature', '0');
       if (prompt) fd.append('prompt', prompt);
+      const t0 = Date.now();
       const res = await fetchT('https://api.groq.com/openai/v1/audio/transcriptions', {method:'POST', headers:{Authorization:'Bearer ' + S.keys.groq.trim()}, body:fd}, 30000);
       if (!res.ok) throw await httpErr(res);
+      log(`识别 ${((Date.now() - t0) / 1000).toFixed(1)}秒`);
       const j = await res.json();
       const segs = Array.isArray(j.segments) ? j.segments : null;
       let text = segs
@@ -429,6 +437,7 @@ async function transcribe(wav, prompt){
       if (e.status === 401 || e.status === 403){ toast('Groq key 无效，请在设置里检查'); throw e; }
       if (e.status === 400 || e.status === 404){ toast('识别请求出错：' + e.message.slice(0, 120)); throw e; }
       const wait = e.retryAfter || (e.status === 429 ? 20000 : 3000);
+      log(`识别失败（第${attempt + 1}次）：${netMsg(e).slice(0, 160)}，${Math.ceil(wait / 1000)}秒后重试`);
       setStatus(`识别${e.status === 429 ? '限流' : '出错'}，${Math.ceil(wait/1000)} 秒后重试`);
       await sleep(Math.min(wait, 120000));
     }
@@ -485,12 +494,15 @@ async function translateWithFallback(sys, user){
   for (const p of PROVIDERS){
     if (!S.enabled[p.id] || !(S.keys[p.keyName] || '').trim()) continue;
     if ((cooldown[p.id] || 0) > Date.now()) continue;
+    const t0 = Date.now();
     try {
       const out = cleanOut(await callProvider(p, sys, user));
       if (!out) throw new Error('空结果');
+      log(`翻译 ${p.name} ${((Date.now() - t0) / 1000).toFixed(1)}秒`);
       activeProvider = p; updateProv();
       return out;
     } catch(e){
+      log(`翻译失败 ${p.name} ${((Date.now() - t0) / 1000).toFixed(1)}秒：${netMsg(e).slice(0, 160)}`);
       lastErr = e;
       let wait = e.retryAfter || (e.status === 429 ? 60e3 : (e.status === 401 || e.status === 403) ? 3600e3 : (e.status === 400 || e.status === 404) ? 600e3 : 20e3);
       if (/per.?day|daily|RPD|TPD/i.test(e.body || '')) wait = Math.max(wait, 15 * 60e3);
@@ -517,16 +529,27 @@ const L = {
   state:'idle', save:true, session:null, lines:[], nextId:1,
   stream:null, ctx:null, src:null, proc:null, sink:null,
   recorder:null, chunkIdx:0, recStopped:null,
-  frames:0, rate:48000, seg:null, noise:0.004, hidden:false,
+  frames:0, rate:48000, seg:null, hist:[], hidden:false,
 };
 
 const Q = { asr:[], asrBusy:false, trBusy:false };
 
 function setStatus(msg){ $('#prov').textContent = msg; }
 function updateProv(){
-  if (L.state === 'idle'){ setStatus(''); return; }
-  setStatus(activeProvider ? '翻译：' + activeProvider.name : '');
+  if (L.state === 'idle' && !Q.asr.length && !Q.tr.length){ setStatus(''); return; }
+  const wait = (Q.asr.length ? `待识别 ${Q.asr.length} ` : '') + (Q.tr.length ? `待翻译 ${Q.tr.length} ` : '');
+  setStatus(wait + (activeProvider ? '翻译：' + activeProvider.name : ''));
 }
+
+// 运行日志：出问题时在设置页最下面看，截图发出来就知道卡在哪
+const LOG = [];
+function log(msg){
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  LOG.push(`${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${msg}`);
+  if (LOG.length > 300) LOG.shift();
+  if ($('#pSettings').classList.contains('show')) renderLog();
+}
+function renderLog(){ $('#logBox').textContent = LOG.slice(-80).reverse().join('\n') || '还没有记录'; }
 
 function pickMime(){
   if (!window.MediaRecorder) return '';
@@ -552,7 +575,12 @@ async function start(){
   const AC = window.AudioContext || window.webkitAudioContext;
   const ctx = new AC();
   if (ctx.state !== 'running') { try { await ctx.resume(); } catch(e){} }
-  Object.assign(L, {stream, ctx, rate:ctx.sampleRate, frames:0, seg:null, noise:0.004, lines:[], nextId:1, save:$('#togSave').checked, hidden:false});
+  // iPad 有时会把音频挂起（来电、别的 App 占用麦克风），记下来并尽量自动恢复
+  ctx.onstatechange = () => {
+    log('音频状态：' + ctx.state);
+    if (ctx.state !== 'running' && ctx.state !== 'closed' && L.state === 'running') ctx.resume().catch(() => {});
+  };
+  Object.assign(L, {stream, ctx, rate:ctx.sampleRate, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false});
   L.src = ctx.createMediaStreamSource(stream);
   L.proc = ctx.createScriptProcessor(4096, 1, 1);
   L.sink = ctx.createGain(); L.sink.gain.value = 0;
@@ -580,6 +608,7 @@ async function start(){
   } else { L.session = null; L.recorder = null; }
 
   L.state = 'running';
+  log(`开始，采样率 ${L.rate}`);
   keepAwake(true);
   updateButtons(); updateProv();
 }
@@ -627,10 +656,14 @@ function onFrame(f){
   const n = f.length, t = L.frames / L.rate; L.frames += n;
   let sum = 0; for (let i = 0; i < n; i++) sum += f[i] * f[i];
   const rms = Math.sqrt(sum / n);
-  const sensMul = [2.2, 1.6, 1.2, 0.9, 0.65][(S.sensitivity|0) - 1] || 1.2;
-  const thr = Math.max(0.006, L.noise * 2.8) * sensMul;
+  // 门槛取在最近 8 秒的"安静水平"和"大声水平"之间。
+  // 老师连续讲课时，安静水平取的是词和句之间的空隙，不会被讲话声越带越高
+  const hist = L.hist; hist.push(rms); if (hist.length > Math.round(8 * L.rate / n)) hist.shift();
+  const sorted = hist.slice().sort((a, b) => a - b);
+  const floor = sorted[Math.floor(sorted.length * 0.1)], loud = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+  const alpha = [0.5, 0.4, 0.3, 0.22, 0.15][(S.sensitivity|0) - 1] || 0.3;
+  const thr = Math.max(0.006, floor * 1.6, floor + (loud - floor) * alpha);
   const speech = rms > thr;
-  if (rms < L.noise * 2 || rms < 0.004) L.noise = L.noise * 0.98 + rms * 0.02; else L.noise = L.noise * 0.9995 + rms * 0.0005;
   $('#level i').style.width = Math.min(100, rms * 900) + '%';
   $('#clock').textContent = fmtT(L.frames / L.rate);
 
@@ -649,10 +682,11 @@ function onFrame(f){
 function flushSeg(){
   const s = L.seg; L.seg = null;
   if (!s || s.speech < 0.4) return;
+  log(`切句 #${L.nextId} ${(s.len / L.rate).toFixed(1)}秒`);
   const line = {id:L.nextId++, t:s.startT, en:'', zh:'', status:'asr'};
   L.lines.push(line); renderLine(line);
   Q.asr.push({line, wav:encodeWav(s.chunks, s.len, L.rate), session:L.session, lines:L.lines});
-  runAsr();
+  updateProv(); runAsr();
 }
 
 async function runAsr(){
@@ -663,7 +697,7 @@ async function runAsr(){
       const prev = job.lines.filter(l => l.en && l.id < line.id).slice(-2).map(l => l.en).join(' ');
       try {
         const text = await transcribe(job.wav, whisperPrompt(prev));
-        if (!text){ removeLine(job, line); continue; }
+        if (!text){ log(`#${line.id} 没识别出内容，丢掉`); removeLine(job, line); updateProv(); continue; }
         line.en = text; line.status = 'tr';
       } catch(e){ line.en = '（识别失败）'; line.status = 'err'; line.zh = netMsg(e); }
       renderLine(line); dirty(job.session, job.lines);
@@ -698,11 +732,13 @@ async function runTr(){
         } else {
           Q.tr.unshift(...batch);
           setStatus('翻译暂时都不可用，稍后重试');
+          log('所有翻译模型都不可用，8秒后重试');
           await sleep(8000); continue;
         }
       }
       items.forEach(renderLine);
       batch.forEach(b => dirty(b.session, b.lines));
+      updateProv();
     }
   } finally { Q.trBusy = false; }
 }
@@ -821,7 +857,9 @@ const Cloud = {
     try {
       do { this.again = false; await this.syncOnce(); } while (this.again);
       this.st.lastSync = Date.now(); this.msg = ''; this.save();
+      log('云同步完成');
     } catch(e){
+      log('云同步失败：' + netMsg(e).slice(0, 160));
       this.msg = e.scope ? '没有 Google Drive 权限。点"立即同步"重新登录，在授权页把 Drive 那一项也勾上。'
         : e.status === 401 ? '登录已过期，点"立即同步"重新登录' : '同步失败：' + netMsg(e);
       console.warn('cloud', e);
@@ -939,7 +977,7 @@ function updateButtons(){
 /* ================= panels ================= */
 function openPanel(sel){
   $(sel).classList.add('show');
-  if (sel === '#pSettings'){ fillSettings(); renderCloud(); }
+  if (sel === '#pSettings'){ fillSettings(); renderCloud(); renderLog(); }
   if (sel === '#pHistory'){ renderHistory(); Cloud.schedule(0); }
 }
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => {
@@ -1084,7 +1122,8 @@ $('#btnSettings').onclick = () => openPanel('#pSettings');
 $('#togZh').onchange = () => { S.showZh = $('#togZh').checked; applyDisplay(); saveSettings(); };
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden'){ if (L.state === 'running') L.hidden = true; return; }
+  if (document.visibilityState === 'hidden'){ if (L.state === 'running'){ L.hidden = true; log('页面切到后台'); } return; }
+  if (L.hidden) log('页面回到前台');
   if (L.state === 'idle' && Cloud.st.on && !Cloud.autoRenew()) Cloud.schedule(500);
   if (L.state !== 'idle'){
     keepAwake(true);
