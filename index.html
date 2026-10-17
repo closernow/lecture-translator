@@ -721,7 +721,7 @@ async function persistNow(sess){
 
 /* ================= cloud sync (Google Drive appDataFolder) ================= */
 // Google Cloud Console 里建的 OAuth 客户端 ID（网页应用），公开的，可以放在代码里
-const GOOGLE_CLIENT_ID = '';
+const GOOGLE_CLIENT_ID = '641870079127-umkgrsmsja6lsv83th1utk8j349mchid.apps.googleusercontent.com';
 const DEVICE_ID = (() => { let d = localStorage.getItem('lt.device'); if (!d){ d = Math.random().toString(36).slice(2, 10); localStorage.setItem('lt.device', d); } return d; })();
 const lsGet = (k, def) => { try { return JSON.parse(localStorage.getItem(k)) ?? def; } catch(e){ return def; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} };
