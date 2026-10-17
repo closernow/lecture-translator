@@ -71,6 +71,8 @@ a{color:#7fb7ff}
 .row label{min-width:110px;color:var(--muted);font-size:14px}
 .row input[type=text],.row input[type=password]{flex:1;min-width:180px}
 .hint{color:var(--muted);font-size:12px;line-height:1.6}
+.eye{padding:6px 10px;font-size:18px;line-height:1}
+.row input.key{min-width:0;width:0}
 .prov{display:grid;grid-template-columns:28px 1fr;gap:4px 8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
 .prov:first-of-type{border-top:0}
 .prov .nm{font-size:14px}
@@ -150,10 +152,9 @@ a{color:#7fb7ff}
 
     <div class="sec">
       <h3>API Key</h3>
-      <div class="row"><label>Groq（必填）</label><input type="password" id="kGroq" autocomplete="off"></div>
-      <div class="row"><label>Gemini</label><input type="password" id="kGemini" autocomplete="off"></div>
-      <div class="row"><label>硅基流动</label><input type="password" id="kSf" autocomplete="off"></div>
-      <div class="row"><button id="btnShowKeys">显示/隐藏</button></div>
+      <div class="row"><label>Groq（必填）</label><input type="password" class="key" id="kGroq" autocomplete="off"><button class="eye" data-for="kGroq" aria-label="显示 key">👁</button></div>
+      <div class="row"><label>Gemini</label><input type="password" class="key" id="kGemini" autocomplete="off"><button class="eye" data-for="kGemini" aria-label="显示 key">👁</button></div>
+      <div class="row"><label>硅基流动</label><input type="password" class="key" id="kSf" autocomplete="off"><button class="eye" data-for="kSf" aria-label="显示 key">👁</button></div>
       <div class="hint">Groq：console.groq.com 注册，不用绑卡。Gemini：aistudio.google.com 里 Get API key。硅基流动：cloud.siliconflow.cn。Groq 用于识别，必须有；翻译至少要有一家可用。</div>
     </div>
 
@@ -1046,7 +1047,11 @@ function fillSettings(){
 }
 const bindKey = (sel, k) => $(sel).onchange = () => { S.keys[k] = $(sel).value.trim(); Object.keys(cooldown).forEach(x => cooldown[x] = 0); saveSettings(); };
 bindKey('#kGroq', 'groq'); bindKey('#kGemini', 'gemini'); bindKey('#kSf', 'sf');
-$('#btnShowKeys').onclick = () => ['#kGroq', '#kGemini', '#kSf'].forEach(s => $(s).type = $(s).type === 'password' ? 'text' : 'password');
+document.querySelectorAll('.eye').forEach(b => b.onclick = () => {
+  const i = document.getElementById(b.dataset.for), show = i.type === 'password';
+  i.type = show ? 'text' : 'password';
+  b.textContent = show ? '🙈' : '👁'; b.setAttribute('aria-label', show ? '隐藏 key' : '显示 key');
+});
 $('#asrModel').onchange = () => { S.asrModel = $('#asrModel').value.trim() || 'whisper-large-v3'; saveSettings(); };
 $('#sens').oninput = () => { S.sensitivity = +$('#sens').value; $('#sensV').textContent = S.sensitivity; saveSettings(); };
 $('#glossary').onchange = () => { S.glossary = $('#glossary').value; saveSettings(); };
