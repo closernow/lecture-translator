@@ -86,7 +86,10 @@ a{color:#7fb7ff}
 .sess .info{flex:1;min-width:0}
 .sess .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sess .meta{color:var(--muted);font-size:12px;margin-top:3px}
-#player{width:100%;margin:6px 0 10px}
+.pl{display:flex;align-items:center;gap:10px;margin:6px 0 10px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
+.pl button{width:44px;height:40px;padding:0;font-size:18px}
+.pl input{flex:1;min-width:0}
+#plTime{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 
 #toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 90px);transform:translateX(-50%);background:#2b333d;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;max-width:90vw;display:none;z-index:50;line-height:1.5}
 </style>
@@ -124,7 +127,12 @@ a{color:#7fb7ff}
 <div class="panel" id="pSession">
   <header><button data-close>返回</button><h2 id="sessTitle"></h2><button id="btnRename">改名</button></header>
   <div class="body">
-    <audio id="player" controls preload="metadata"></audio>
+    <div id="pl" class="pl">
+      <button id="plBtn" aria-label="播放">▶</button>
+      <input type="range" id="plBar" min="0" max="1" step="0.1" value="0">
+      <span id="plTime"></span>
+    </div>
+    <audio id="player" preload="auto"></audio>
     <div class="row">
       <button id="btnExportTxt">导出文字</button>
       <button id="btnExportAudio">导出录音</button>
@@ -203,6 +211,8 @@ a{color:#7fb7ff}
     <div class="sec">
       <h3>存储</h3>
       <div class="hint" id="storageInfo"></div>
+      <div class="row"><label>本机录音保留</label><input type="number" id="keepDays" min="0" max="3650" style="width:90px"><span class="hint">天</span></div>
+      <div class="hint">开了云同步时，录音每 3 分钟一段传到 Drive；超过这个天数的课，本机只删已经传上去的录音，要听时自动从云端下载。填 0 就是传完就删。没开云同步时不会删。</div>
     </div>
 
     <div class="sec">
@@ -279,7 +289,7 @@ const DEFAULTS = {
   asrEngine:'auto', dgModel:'nova-3', asrModel:'whisper-large-v3',
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
-  showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3,
+  showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3, keepDays:30,
 };
 let S;
 function loadSettings(){
@@ -349,10 +359,20 @@ const DB = {
   },
   getSession(id){ return this.run('sessions', 'readonly', st => st.get(id)); },
   allSessions(){ return this.run('sessions', 'readonly', st => st.getAll()); },
-  putChunk(sessionId, idx, blob){ return this.run('chunks', 'readwrite', st => st.put({key:sessionId + ':' + String(idx).padStart(6,'0'), sessionId, idx, blob})); },
+  // 老格式：每 10 秒一块，拼起来是一个文件
   async getChunks(sessionId){
     const all = await this.run('chunks', 'readonly', st => st.index('session').getAll(sessionId));
-    return (all || []).sort((a,b) => a.idx - b.idx).map(c => c.blob);
+    return (all || []).filter(c => !c.seg).sort((a,b) => a.idx - b.idx).map(c => c.blob);
+  },
+  // 新格式：每 3 分钟一个完整文件（seg:true），和老格式存在同一个表里
+  segKey:(sid, idx) => sid + ':s' + String(idx).padStart(4, '0'),
+  putSeg(r){ r.key = this.segKey(r.sessionId, r.idx); r.seg = true; return this.run('chunks', 'readwrite', st => st.put(r)); },
+  getSeg(sid, idx){ return this.run('chunks', 'readonly', st => st.get(this.segKey(sid, idx))); },
+  async allSegs(){ return ((await this.run('chunks', 'readonly', st => st.getAll())) || []).filter(c => c.seg); },
+  delKey(key){ return this.run('chunks', 'readwrite', st => st.delete(key)); },
+  async delOldChunks(sid){
+    const all = await this.run('chunks', 'readonly', st => st.index('session').getAll(sid));
+    for (const c of (all || []).filter(c => !c.seg)) await this.delKey(c.key);
   },
   async deleteSession(id){
     await this.run('sessions', 'readwrite', st => st.delete(id));
@@ -536,7 +556,7 @@ function parseNumbered(out, n){
 const L = {
   state:'idle', save:true, session:null, lines:[], nextId:1,
   stream:null, ctx:null, src:null, proc:null, sink:null,
-  recorder:null, chunkIdx:0, recStopped:null,
+  mime:'', rec:null, segIdx:0, recTimer:null,
   frames:0, rate:48000, seg:null, hist:[], hidden:false,
 };
 
@@ -603,25 +623,17 @@ async function start(){
   if (L.save){
     const now = new Date();
     const mime = pickMime();
-    L.session = {id:'s' + now.getTime(), title:defaultTitle(now), createdAt:now.getTime(), duration:0, mime, lines:[], status:'recording'};
+    L.session = {id:'s' + now.getTime(), title:defaultTitle(now), createdAt:now.getTime(), duration:0, mime, segs:[], lines:[], status:'recording'};
     try { await DB.putSession(L.session); } catch(e){ toast('本地存储不可用，这次不保存：' + e.message); L.save = false; L.session = null; }
-    if (L.save && mime){
-      try {
-        L.chunkIdx = 0;
-        L.recorder = new MediaRecorder(stream, {mimeType:mime, audioBitsPerSecond:48000});
-        const sid = L.session.id;
-        let pending = Promise.resolve();
-        L.recorder.ondataavailable = e => { if (e.data && e.data.size){ const idx = L.chunkIdx++; pending = pending.then(() => DB.putChunk(sid, idx, e.data)).catch(err => toast('录音块保存失败：' + err.message)); } };
-        L.recStopped = new Promise(r => { L.recorder.onstop = () => pending.then(r, r); });
-        L.recorder.start(10000);
-      } catch(e){ toast('录音功能启动失败，只保存文字：' + e.message); L.recorder = null; }
-    } else if (L.save && !mime){ toast('这个浏览器不支持录音，只保存文字'); }
-  } else { L.session = null; L.recorder = null; }
+    L.mime = L.save ? mime : ''; L.segIdx = 0; L.rec = null;
+    if (L.save && !mime) toast('这个浏览器不支持录音，只保存文字');
+  } else { L.session = null; L.mime = ''; L.rec = null; }
 
   L.engine = engine;
   L.state = 'running';
   log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}，采样率 ${L.rate}`);
   if (engine === 'dg') DG.begin();
+  if (L.mime){ recStart(); clearInterval(L.recTimer); L.recTimer = setInterval(recRotate, 1000); }
   keepAwake(true);
   updateButtons(); updateProv();
 }
@@ -632,21 +644,66 @@ function pause(){
   if (L.state !== 'running') return;
   if (L.engine === 'dg') DG.pause(); else flushSeg();
   L.state = 'paused';
-  try { if (L.recorder && L.recorder.state === 'recording') L.recorder.pause(); } catch(e){}
+  recStop();   // 暂停时把这一段录音收尾存好，继续时开新的一段
   $('#level i').style.width = '0';
   updateButtons();
 }
 function resume(){
   if (L.state !== 'paused') return;
   if (L.ctx.state !== 'running') L.ctx.resume();
-  try { if (L.recorder && L.recorder.state === 'paused') L.recorder.resume(); } catch(e){}
   L.state = 'running';
+  if (L.mime) recStart();
   updateButtons();
+}
+
+/* ================= 录音：每 3 分钟一个完整文件 ================= */
+// 不用"边录边切小块"（iPad 上容易坏），而是每段完整录完再存；
+// 一段一个文件，方便单独上传云端、单独删本机
+const REC_SEG = 180;
+function recStart(){
+  let rec;
+  try { rec = new MediaRecorder(L.stream, {mimeType:L.mime, audioBitsPerSecond:48000}); }
+  catch(e){ toast('录音功能启动失败，只保存文字：' + e.message); log('录音启动失败：' + e.message); L.mime = ''; return; }
+  const seg = {rec, idx:L.segIdx++, t0:L.frames / L.rate, t1:null, parts:[], mime:L.mime.split(';')[0], sess:L.session};
+  rec.ondataavailable = e => { if (e.data && e.data.size) seg.parts.push(e.data); };
+  rec.onerror = e => log('录音出错：' + ((e.error && e.error.message) || e.name || ''));
+  seg.done = new Promise(r => { rec.onstop = r; }).then(() => recSave(seg));
+  try { rec.start(); } catch(e){ toast('录音功能启动失败，只保存文字：' + e.message); L.mime = ''; return; }
+  L.rec = seg;
+}
+function recStop(){
+  const seg = L.rec; L.rec = null;
+  if (!seg) return Promise.resolve();
+  seg.t1 = L.frames / L.rate;
+  try { if (seg.rec.state !== 'inactive') seg.rec.stop(); else return recSave(seg); } catch(e){ return recSave(seg); }
+  return seg.done;
+}
+// 满 3 分钟：先开新的一段再停旧的，中间不漏
+function recRotate(){
+  if (L.state !== 'running' || !L.rec || L.frames / L.rate - L.rec.t0 < REC_SEG) return;
+  const old = L.rec; old.t1 = L.frames / L.rate;
+  recStart();
+  try { old.rec.stop(); } catch(e){}
+}
+async function recSave(seg){
+  if (seg.saved) return; seg.saved = true;
+  if (!seg.parts.length){ log(`录音第${seg.idx + 1}段是空的`); return; }
+  const blob = new Blob(seg.parts, {type:seg.mime});
+  const meta = {idx:seg.idx, t0:seg.t0, dur:Math.max(0, (seg.t1 == null ? L.frames / L.rate : seg.t1) - seg.t0), mime:seg.mime};
+  try { await DB.putSeg(Object.assign({sessionId:seg.sess.id, blob, own:true}, meta)); }
+  catch(e){ toast('录音保存失败：' + e.message); log('录音保存失败：' + e.message); return; }
+  seg.sess.segs = (seg.sess.segs || []).filter(s => s.idx !== meta.idx).concat(meta).sort((a, b) => a.idx - b.idx);
+  await persistNow(seg.sess);
+  log(`录音第${seg.idx + 1}段已存 ${(blob.size / 1048576).toFixed(1)}MB ${Math.round(meta.dur)}秒`);
 }
 
 async function end(){
   if (L.state === 'idle') return;
   if (L.state === 'running' && L.engine !== 'dg') flushSeg();
+  const sess = L.session;
+  // 先把录音收尾存好，再关麦克风（反过来 iPad 上录音文件会坏）
+  clearInterval(L.recTimer);
+  await recStop();
   L.state = 'idle';
   updateButtons(); keepAwake(false);
   try { L.proc.disconnect(); L.src.disconnect(); L.sink.disconnect(); } catch(e){}
@@ -654,8 +711,6 @@ async function end(){
   try { await L.ctx.close(); } catch(e){}
   $('#level i').style.width = '0';
   if (L.engine === 'dg') await DG.stop();
-  const sess = L.session;
-  if (L.recorder){ try { if (L.recorder.state !== 'inactive') L.recorder.stop(); await L.recStopped; } catch(e){} L.recorder = null; }
   if (sess){
     sess.duration = L.frames / L.rate; sess.status = 'done';
     await persistNow(sess);
@@ -947,8 +1002,8 @@ const Cloud = {
   },
   logout(){ this.st = {}; this.synced.clear(); this.del = []; this.save(); renderCloud(); },
 
-  async api(method, url, opts = {}){
-    const res = await fetchT(url, Object.assign({method}, opts, {headers:Object.assign({Authorization:'Bearer ' + this.st.token}, opts.headers || {})}), 30000);
+  async api(method, url, opts = {}, ms = 30000){
+    const res = await fetchT(url, Object.assign({method}, opts, {headers:Object.assign({Authorization:'Bearer ' + this.st.token}, opts.headers || {})}), ms);
     if (res.status === 401){ this.st.token = ''; this.save(); }
     if (res.status === 403 && /insufficient.{0,20}scope/i.test(await res.clone().text())){
       this.st.token = ''; this.save();
@@ -966,6 +1021,20 @@ const Cloud = {
     return files;
   },
   async download(id){ return (await this.api('GET', `https://www.googleapis.com/drive/v3/files/${id}?alt=media`)).json(); },
+  // 录音文件：audio-<课id>-<段号>
+  audioName:(sid, idx) => `audio-${sid}-${idx}`,
+  async audioId(sid, idx){
+    const name = this.audioName(sid, idx);
+    if (!this.ids || !this.ids.has(name)) this.ids = new Map((await this.list()).map(f => [f.name, f.id]));
+    return this.ids.get(name);
+  },
+  async uploadBlob(name, blob){
+    const b = 'lt' + Math.random().toString(36).slice(2);
+    const meta = {name, parents:['appDataFolder']};
+    const body = new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${blob.type || 'application/octet-stream'}\r\n\r\n`, blob, `\r\n--${b}--`]);
+    const r = await this.api('POST', 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {headers:{'Content-Type':'multipart/related; boundary=' + b}, body}, 120000);
+    return (await r.json()).id;
+  },
   async upload(id, name, data, updatedAt){
     const meta = {appProperties:{u:String(updatedAt || 0)}};
     if (!id){ meta.name = name; meta.parents = ['appDataFolder']; }
@@ -1001,6 +1070,7 @@ const Cloud = {
   async syncOnce(){
     const files = await this.list();
     const byName = new Map(files.map(f => [f.name, f]));
+    this.ids = new Map(files.map(f => [f.name, f.id]));
     const fu = f => +((f.appProperties && f.appProperties.u) || 0);
     let changed = false;
 
@@ -1018,17 +1088,19 @@ const Cloud = {
       await this.upload(sf && sf.id, 'settings.json', Object.fromEntries(SYNC_KEYS.map(k => [k, S[k]])), S.updatedAt);
     }
 
-    // 本机删掉的，云端也删
+    // 本机删掉的，云端也删（文字和录音）
     for (const id of this.del.slice()){
-      const f = byName.get('session-' + id + '.json');
-      if (f){ try { await this.api('DELETE', 'https://www.googleapis.com/drive/v3/files/' + f.id); } catch(e){ if (e.status !== 404) throw e; } byName.delete(f.name); }
+      for (const f of [...byName.values()].filter(f => f.name === 'session-' + id + '.json' || f.name.startsWith('audio-' + id + '-'))){
+        try { await this.api('DELETE', 'https://www.googleapis.com/drive/v3/files/' + f.id); } catch(e){ if (e.status !== 404) throw e; }
+        byName.delete(f.name);
+      }
       this.del = this.del.filter(x => x !== id); this.synced.delete(id); this.save();
     }
 
-    // 历史记录：一节课一个文件，谁新用谁的；录音不上传
+    // 历史记录：一节课一个文件，谁新用谁的（录音在下面单独传）
     const local = (await DB.allSessions()) || [];
     const localIds = new Set(local.map(s => s.id));
-    const pack = s => ({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, lines:s.lines || [], updatedAt:s.updatedAt || 0});
+    const pack = s => ({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], updatedAt:s.updatedAt || 0});
     for (const s0 of local){
       const live = L.state !== 'idle' && L.session && L.session.id === s0.id;
       const s = live ? L.session : s0;
@@ -1051,6 +1123,31 @@ const Cloud = {
       this.synced.add(m[1]); changed = true;
     }
     this.save();
+
+    // 录音：每段录完就传；传上去的，本机超过保留天数就删（要听时再从云端下载）
+    const sessNow = new Map(((await DB.allSessions()) || []).map(s => [s.id, s]));
+    const keepMs = Math.max(0, +S.keepDays || 0) * 86400e3;
+    for (const r of await DB.allSegs()){
+      if (!r.blob) continue;
+      const sess = sessNow.get(r.sessionId);
+      if (!sess){ await DB.delKey(r.key); continue; }   // 课已经删了
+      const name = this.audioName(r.sessionId, r.idx);
+      if (!r.up){
+        if (!byName.has(name)){
+          const id = await this.uploadBlob(name, r.blob);
+          this.ids.set(name, id);
+          log(`录音已上传：${sess.title} 第${r.idx + 1}段 ${(r.blob.size / 1048576).toFixed(1)}MB`);
+        }
+        r.up = true;
+        if (sessNow.has(r.sessionId)) await DB.putSeg(r);
+      }
+      const old = r.cachedAt ? Date.now() - r.cachedAt > 7 * 86400e3 : Date.now() - sess.createdAt > keepMs;
+      const playing = P.sess && P.sess.id === r.sessionId;
+      if (r.up && old && !playing && !(L.session && L.session.id === r.sessionId && L.state !== 'idle')){
+        await DB.delKey(r.key);
+        log(`本机录音已清理：${sess.title} 第${r.idx + 1}段（云端还有）`);
+      }
+    }
     if (changed && $('#pHistory').classList.contains('show')) renderHistory();
   },
 };
@@ -1116,7 +1213,7 @@ function openPanel(sel){
 }
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => {
   const p = b.closest('.panel'); p.classList.remove('show');
-  if (p.id === 'pSession'){ const a = $('#player'); a.pause(); if (a.src) URL.revokeObjectURL(a.src); a.removeAttribute('src'); }
+  if (p.id === 'pSession') plReset();
 });
 
 /* history */
@@ -1131,26 +1228,93 @@ async function renderHistory(){
   box.querySelectorAll('.sess').forEach(el => el.onclick = () => openSession(el.dataset.id));
 }
 
+/* 播放器：一节课的录音是好几段，连起来播；本机没有的段从云端下载 */
+const P = {sess:null, segs:[], i:-1, url:null, total:0, seeking:false};
+function plReset(){
+  const a = $('#player'); a.pause(); a.removeAttribute('src'); a.load();
+  if (P.url) URL.revokeObjectURL(P.url);
+  Object.assign(P, {sess:null, segs:[], i:-1, url:null, total:0});
+  $('#plBtn').textContent = '▶';
+}
+function plShow(){
+  const a = $('#player'), seg = P.segs[P.i];
+  const cur = seg ? seg.t0 + (a.currentTime || 0) : 0;
+  if (!P.seeking) $('#plBar').value = cur;
+  $('#plTime').textContent = fmtT(cur) + ' / ' + fmtT(P.total);
+  $('#plBtn').textContent = a.paused ? '▶' : '⏸';
+}
+async function segBlob(sess, seg){
+  if (seg.blob) return seg.blob;   // 老格式，已经拼好
+  const r = await DB.getSeg(sess.id, seg.idx);
+  if (r && r.blob) return r.blob;
+  if (!Cloud.st.on) throw new Error('这段录音不在本机，开启云同步后才能从云端取');
+  if (!Cloud.ready()) throw new Error('云同步登录过期，先去设置点"立即同步"');
+  const id = await Cloud.audioId(sess.id, seg.idx);
+  if (!id) throw new Error('云端没有这段录音（可能录音的设备还没上传）');
+  toast('正在从云端下载录音…', 2000);
+  const got = await (await Cloud.api('GET', `https://www.googleapis.com/drive/v3/files/${id}?alt=media`)).blob();
+  const blob = new Blob([got], {type:seg.mime});
+  await DB.putSeg({sessionId:sess.id, idx:seg.idx, t0:seg.t0, dur:seg.dur, mime:seg.mime, blob, up:true, cachedAt:Date.now()});
+  return blob;
+}
+async function plAt(t, play = true){
+  const segs = P.segs; if (!segs.length) return;
+  let i = segs.findIndex(s => t < s.t0 + s.dur); if (i < 0) i = segs.length - 1;
+  const seg = segs[i], a = $('#player'), sess = P.sess;
+  try {
+    if (P.i !== i){
+      const blob = await segBlob(sess, seg);
+      if (P.sess !== sess) return;   // 下载期间关掉了
+      if (P.url) URL.revokeObjectURL(P.url);
+      P.url = URL.createObjectURL(blob); P.i = i;
+      a.src = P.url;
+      await new Promise((res, rej) => {
+        a.onloadedmetadata = res;
+        a.onerror = () => rej(new Error('录音文件打不开（错误码 ' + (a.error ? a.error.code : '?') + '）'));
+      });
+      // 时长不知道的（意外中断的老录音）用文件自己的
+      if (seg.dur < 1 && isFinite(a.duration)){ seg.dur = a.duration; P.total = Math.max(P.total, seg.t0 + seg.dur); $('#plBar').max = P.total; }
+    }
+    const off = Math.max(0, t - seg.t0);
+    a.currentTime = seg.dur >= 1 ? Math.min(off, seg.dur - 0.2) : off;
+    if (play) await a.play();
+  } catch(e){ toast(e.message); log('播放：' + e.message); }
+  plShow();
+}
+(() => {
+  const a = $('#player');
+  ['timeupdate', 'play', 'pause'].forEach(ev => a.addEventListener(ev, plShow));
+  a.addEventListener('ended', () => { if (P.i + 1 < P.segs.length) plAt(P.segs[P.i + 1].t0); else plShow(); });   // 一段播完接下一段
+  $('#plBtn').onclick = () => { if (!P.segs.length) return; if (P.i < 0) plAt(0); else if (a.paused) a.play().catch(e => toast(e.message)); else a.pause(); };
+  $('#plBar').oninput = () => { P.seeking = true; $('#plTime').textContent = fmtT(+$('#plBar').value) + ' / ' + fmtT(P.total); };
+  $('#plBar').onchange = () => { P.seeking = false; plAt(+$('#plBar').value, P.i < 0 || !a.paused); };
+})();
+
 let curSess = null;
 async function openSession(id){
   curSess = await DB.getSession(id); if (!curSess) return;
+  plReset();
   $('#sessTitle').textContent = curSess.title;
-  const a = $('#player'); a.removeAttribute('src');
-  const chunks = await DB.getChunks(id);
-  $('#btnExportAudio').disabled = !chunks.length;
-  if (chunks.length){
-    const blob = new Blob(chunks, {type:(curSess.mime || 'audio/mp4').split(';')[0]});
-    a.src = URL.createObjectURL(blob); a.style.display = '';
-    a.onloadedmetadata = () => { if (a.duration === Infinity){ a.currentTime = 1e7; a.ontimeupdate = () => { a.ontimeupdate = null; a.currentTime = 0; }; } };
-  } else a.style.display = 'none';
-  $('#sessHint').textContent = chunks.length ? '点任意一句，录音跳到那里播放。' : (curSess.device && curSess.device !== DEVICE_ID ? '这节在另一台设备上录的，录音在那台设备上。' : '这节没有录音。');
+  let segs = (curSess.segs || []).slice();
+  if (!segs.length){   // 老格式
+    const chunks = await DB.getChunks(id);
+    if (chunks.length) segs = [{idx:0, t0:0, dur:curSess.duration || 0, mime:(curSess.mime || 'audio/mp4').split(';')[0], blob:new Blob(chunks, {type:(curSess.mime || 'audio/mp4').split(';')[0]})}];
+  }
+  Object.assign(P, {sess:curSess, segs, total:segs.length ? Math.max(curSess.duration || 0, segs[segs.length - 1].t0 + segs[segs.length - 1].dur) : 0});
+  $('#plBar').max = P.total || 1; $('#plBar').value = 0;
+  $('#pl').style.display = segs.length ? '' : 'none';
+  $('#btnExportAudio').disabled = !segs.length;
+  plShow();
+  const ownHere = !curSess.device || curSess.device === DEVICE_ID;
+  $('#sessHint').textContent = segs.length ? '点任意一句，录音跳到那里播放。' + (ownHere ? '' : '录音在云端，第一次播放要下载。')
+    : (ownHere ? '这节没有录音。' : '这节在另一台设备上录的，那台设备还没把录音传上云端。');
   const box = $('#sessLines');
   box.innerHTML = (curSess.lines || []).map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}</div><div class="en">${esc(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
   box.querySelectorAll('.line').forEach(el => el.onclick = () => {
-    if (!a.src) return;
+    if (!P.segs.length) return;
     const l = curSess.lines[+el.dataset.i];
     box.querySelectorAll('.playing').forEach(x => x.classList.remove('playing')); el.classList.add('playing');
-    a.currentTime = Math.max(0, l.t - 0.3); a.play().catch(() => {});
+    plAt(Math.max(0, l.t - 0.3));
   });
   openPanel('#pSession');
 }
@@ -1175,8 +1339,7 @@ async function shareOrDownload(blob, filename){
   if (navigator.canShare && navigator.canShare({files:[file]})){
     try { await navigator.share({files:[file]}); return; } catch(e){ if (e.name === 'AbortError') return; }
   }
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
-  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+  shareDownload(blob, filename);
 }
 $('#btnExportTxt').onclick = () => {
   if (!curSess) return;
@@ -1185,11 +1348,26 @@ $('#btnExportTxt').onclick = () => {
   shareOrDownload(new Blob([head + body], {type:'text/plain;charset=utf-8'}), safeName(curSess.title) + '.txt');
 };
 $('#btnExportAudio').onclick = async () => {
-  if (!curSess) return;
-  const chunks = await DB.getChunks(curSess.id); if (!chunks.length) return;
-  const type = (curSess.mime || 'audio/mp4').split(';')[0];
-  shareOrDownload(new Blob(chunks, {type}), safeName(curSess.title) + (type.includes('webm') ? '.webm' : '.m4a'));
+  if (!curSess || !P.segs.length) return;
+  const sess = curSess, files = [];
+  try {
+    for (const seg of P.segs){
+      const blob = await segBlob(sess, seg);
+      const ext = seg.mime.includes('webm') ? '.webm' : '.m4a';
+      files.push(new File([blob], safeName(sess.title) + (P.segs.length > 1 ? '_' + String(files.length + 1).padStart(2, '0') : '') + ext, {type:seg.mime}));
+    }
+  } catch(e){ toast(e.message); return; }
+  if (files.length === 1) return shareOrDownload(files[0], files[0].name);
+  // 多段：iPad 上一次分享全部（可以"存储到文件"），不支持就逐个下载
+  if (navigator.canShare && navigator.canShare({files})){
+    try { await navigator.share({files}); return; } catch(e){ if (e.name === 'AbortError') return; }
+  }
+  for (const f of files){ shareDownload(f, f.name); await sleep(400); }
 };
+function shareDownload(blob, filename){
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+}
 
 /* settings */
 function fillSettings(){
@@ -1199,6 +1377,7 @@ function fillSettings(){
   $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
   $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
   $('#saveDefault').checked = S.saveDefault;
+  $('#keepDays').value = S.keepDays;
   if (!$('#cmpText').value) $('#cmpText').value = 'Before you light the furnace, check the inlet and manifold pressure with a manometer, and make sure the inducer motor proves the pressure switch.';
   $('#provList').innerHTML = PROVIDERS.map(p => {
     const cd = (cooldown[p.id] || 0) - Date.now();
@@ -1220,7 +1399,8 @@ function fillSettings(){
 const bindKey = (sel, k) => $(sel).onchange = () => { S.keys[k] = $(sel).value.trim(); Object.keys(cooldown).forEach(x => cooldown[x] = 0); saveSettings(); };
 bindKey('#kDg', 'dg'); bindKey('#kGroq', 'groq'); bindKey('#kGemini', 'gemini'); bindKey('#kSf', 'sf');
 $('#asrEngine').onchange = () => { S.asrEngine = $('#asrEngine').value; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
-$('#dgModel').onchange = () => { S.dgModel = $('#dgModel').value.trim() || 'nova-3'; saveSettings(); };
+$('#keepDays').onchange = () => { const v = Math.round(+$('#keepDays').value); S.keepDays = isFinite(v) && v >= 0 ? v : 30; $('#keepDays').value = S.keepDays; saveSettings(); Cloud.schedule(1000); };
+$('#dgModel').onchange =() => { S.dgModel = $('#dgModel').value.trim() || 'nova-3'; saveSettings(); };
 document.querySelectorAll('.eye').forEach(b => b.onclick = () => {
   const i = document.getElementById(b.dataset.for), show = i.type === 'password';
   i.type = show ? 'text' : 'password';
@@ -1284,9 +1464,21 @@ loadSettings(); lastSyncPart = syncPart(); applyDisplay();
 $('#togSave').checked = S.saveDefault;
 updateButtons();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-DB.allSessions().then(list => { // 本机上次意外中断的标记一下（别的设备正在录的不管）
+DB.allSessions().then(async list => {
+  // 本机上次意外中断的标记一下（别的设备正在录的不管）
   (list || []).filter(s => s.status === 'recording' && (!s.device || s.device === DEVICE_ID)).forEach(s => { s.status = 'interrupted'; DB.putSession(s); });
-}).catch(() => {});
+  // 老格式录音（10 秒一块）拼成一段，转成新格式，这样也能传云端
+  for (const s of list || []){
+    if (s.segs && s.segs.length) continue;
+    const chunks = await DB.getChunks(s.id); if (!chunks.length) continue;
+    const mime = (s.mime || 'audio/mp4').split(';')[0];
+    const meta = {idx:0, t0:0, dur:s.duration || 0, mime};
+    await DB.putSeg(Object.assign({sessionId:s.id, blob:new Blob(chunks, {type:mime}), own:true}, meta));
+    await DB.delOldChunks(s.id);
+    s.segs = [meta]; await DB.putSession(s);
+    log('老录音已转换：' + s.title);
+  }
+}).catch(e => log('启动检查出错：' + e.message));
 (async () => {
   await Cloud.handleRedirect();
   if (Cloud.ready()){ localStorage.removeItem('lt.silentAt'); Cloud.sync(); }
