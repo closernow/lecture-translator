@@ -1,0 +1,901 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="课堂同传">
+<meta name="theme-color" content="#0d0f12">
+<title>课堂同传</title>
+<style>
+:root{
+  --bg:#0d0f12; --panel:#161a20; --line:#232a33; --text:#eef1f4; --muted:#7d8794;
+  --accent:#3fa36b; --warn:#d9a441; --danger:#d0574f;
+  --fs:22px; --zh-op:.55;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",Arial,sans-serif}
+body{display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;color:inherit;background:#232a33;border:0;border-radius:10px;padding:10px 14px;cursor:pointer}
+button:disabled{opacity:.4}
+input,textarea,select{font:inherit;color:var(--text);background:#0f1317;border:1px solid var(--line);border-radius:8px;padding:8px}
+textarea{width:100%}
+a{color:#7fb7ff}
+
+/* top bar */
+#top{display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top) + 8px) 14px 8px;border-bottom:1px solid var(--line);background:var(--panel)}
+#top .title{font-weight:600}
+#clock{font-variant-numeric:tabular-nums;color:var(--muted);min-width:64px}
+#level{width:60px;height:6px;background:#2a313a;border-radius:3px;overflow:hidden}
+#level i{display:block;height:100%;width:0;background:var(--accent);transition:width .08s}
+#prov{color:var(--muted);font-size:12px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#top button{padding:8px 12px}
+
+/* subtitles */
+#subs{flex:1;overflow-y:auto;padding:16px 18px 30px;-webkit-overflow-scrolling:touch}
+.empty{color:var(--muted);text-align:center;margin-top:30vh;line-height:1.8}
+.line{margin:0 0 18px}
+.line .t{font-size:11px;color:#56606b;font-variant-numeric:tabular-nums}
+.line .en{font-size:var(--fs);line-height:1.45;color:var(--text)}
+.line .zh{font-size:calc(var(--fs) * .9);line-height:1.5;color:var(--text);opacity:var(--zh-op);margin-top:2px}
+.hide-zh .line .zh{display:none}
+.line.asr .en{color:var(--muted);font-style:italic}
+.line.tr .zh{font-style:italic}
+.line.err .zh{color:var(--danger);opacity:.8}
+.clickable .line{cursor:pointer;border-radius:8px;padding:4px 6px;margin-left:-6px}
+.clickable .line:active,.clickable .line.playing{background:#1b222b}
+#jump{position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom) + 96px);display:none;background:#2d6b4a}
+
+/* bottom bar */
+#bottom{display:flex;align-items:center;gap:10px;padding:10px 14px calc(env(safe-area-inset-bottom) + 10px);border-top:1px solid var(--line);background:var(--panel)}
+#bottom .big{font-size:18px;padding:14px 22px;border-radius:14px}
+#btnStart{background:var(--accent);color:#fff}
+#btnEnd{background:var(--danger);color:#fff}
+#btnPause{background:var(--warn);color:#111}
+.spacer{flex:1}
+.tog{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:14px;user-select:none}
+.tog input{width:20px;height:20px}
+
+/* panels */
+.panel{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;z-index:10}
+.panel.show{display:flex}
+.panel header{display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top) + 8px) 14px 8px;border-bottom:1px solid var(--line);background:var(--panel)}
+.panel header h2{font-size:17px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.panel .body{flex:1;overflow-y:auto;padding:14px 16px calc(env(safe-area-inset-bottom) + 40px);-webkit-overflow-scrolling:touch}
+.sec{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:14px}
+.sec h3{margin:0 0 10px;font-size:15px}
+.row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
+.row label{min-width:110px;color:var(--muted);font-size:14px}
+.row input[type=text],.row input[type=password]{flex:1;min-width:180px}
+.hint{color:var(--muted);font-size:12px;line-height:1.6}
+.prov{display:grid;grid-template-columns:28px 1fr;gap:4px 8px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.prov:first-of-type{border-top:0}
+.prov .nm{font-size:14px}
+.prov .st{font-size:11px;color:var(--muted)}
+.prov input[type=text]{grid-column:2;width:100%;font-size:13px}
+.cmp{border-top:1px solid var(--line);padding:8px 0;font-size:15px}
+.cmp b{font-size:12px;color:var(--muted);font-weight:400}
+
+.sess{display:flex;align-items:center;gap:8px;padding:12px;border:1px solid var(--line);border-radius:12px;margin-bottom:10px;background:var(--panel)}
+.sess .info{flex:1;min-width:0}
+.sess .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess .meta{color:var(--muted);font-size:12px;margin-top:3px}
+#player{width:100%;margin:6px 0 10px}
+
+#toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 90px);transform:translateX(-50%);background:#2b333d;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;max-width:90vw;display:none;z-index:50;line-height:1.5}
+</style>
+</head>
+<body>
+
+<div id="top">
+  <span class="title">课堂同传</span>
+  <span id="clock">00:00</span>
+  <span id="level"><i></i></span>
+  <span id="prov"></span>
+  <button id="btnHistory">历史</button>
+  <button id="btnSettings">设置</button>
+</div>
+
+<div id="subs"><div class="empty">点"开始"，手机/平板对着讲台<br>英文识别后会显示中文翻译</div></div>
+<button id="jump">↓ 回到最新</button>
+
+<div id="bottom">
+  <button id="btnStart" class="big">开始</button>
+  <button id="btnPause" class="big" style="display:none">暂停</button>
+  <button id="btnEnd" class="big" style="display:none">结束</button>
+  <span class="spacer"></span>
+  <label class="tog"><input type="checkbox" id="togSave">保存</label>
+  <label class="tog"><input type="checkbox" id="togZh">中文</label>
+</div>
+
+<!-- history -->
+<div class="panel" id="pHistory">
+  <header><button data-close>返回</button><h2>历史记录</h2></header>
+  <div class="body" id="histList"></div>
+</div>
+
+<!-- session detail -->
+<div class="panel" id="pSession">
+  <header><button data-close>返回</button><h2 id="sessTitle"></h2><button id="btnRename">改名</button></header>
+  <div class="body">
+    <audio id="player" controls preload="metadata"></audio>
+    <div class="row">
+      <button id="btnExportTxt">导出文字</button>
+      <button id="btnExportAudio">导出录音</button>
+      <button id="btnDelete" style="background:#3a2222">删除</button>
+    </div>
+    <div class="hint">点任意一句，录音跳到那里播放。</div>
+    <div id="sessLines" class="clickable" style="margin-top:14px"></div>
+  </div>
+</div>
+
+<!-- settings -->
+<div class="panel" id="pSettings">
+  <header><button data-close>返回</button><h2>设置</h2></header>
+  <div class="body">
+
+    <div class="sec">
+      <h3>API Key（只存在本设备浏览器里）</h3>
+      <div class="row"><label>Groq（必填）</label><input type="password" id="kGroq" autocomplete="off"></div>
+      <div class="row"><label>Gemini</label><input type="password" id="kGemini" autocomplete="off"></div>
+      <div class="row"><label>硅基流动</label><input type="password" id="kSf" autocomplete="off"></div>
+      <div class="row"><button id="btnShowKeys">显示/隐藏</button></div>
+      <div class="hint">Groq：console.groq.com 注册，不用绑卡。Gemini：aistudio.google.com 里 Get API key。硅基流动：cloud.siliconflow.cn。Groq 用于识别，必须有；翻译至少要有一家可用。</div>
+    </div>
+
+    <div class="sec">
+      <h3>识别</h3>
+      <div class="row"><label>Whisper 模型</label><input type="text" id="asrModel"></div>
+      <div class="row"><label>灵敏度</label><input type="range" id="sens" min="1" max="5" step="1"><span id="sensV" class="hint"></span></div>
+      <div class="hint">教室吵、识别出很多杂音就调低；老师声音小、经常漏句就调高。</div>
+    </div>
+
+    <div class="sec">
+      <h3>翻译模型（从上往下依次尝试，限流自动换下一个）</h3>
+      <div id="provList"></div>
+      <div class="hint">模型名一般不用改。哪家改了模型名或下线了，在这里改成新名字。</div>
+    </div>
+
+    <div class="sec">
+      <h3>术语表</h3>
+      <div class="hint">每行一个：英文 = 中文。只写英文也行（只帮助识别）。# 开头是注释。识别和翻译时自动带上，只发当前句子里出现的词。</div>
+      <textarea id="glossary" rows="12" style="margin-top:8px"></textarea>
+    </div>
+
+    <div class="sec">
+      <h3>显示</h3>
+      <div class="row"><label>字号</label><input type="range" id="fs" min="16" max="36" step="1"><span id="fsV" class="hint"></span></div>
+      <div class="row"><label>中文亮度</label><input type="range" id="zhOp" min="0.2" max="1" step="0.05"><span id="zhOpV" class="hint"></span></div>
+      <div class="row"><label>默认保存</label><input type="checkbox" id="saveDefault" style="width:20px;height:20px"><span class="hint">开始时"保存"开关的默认状态</span></div>
+    </div>
+
+    <div class="sec">
+      <h3>模型对比</h3>
+      <div class="hint">同一段英文发给所有开启的模型，并排看译文和速度。可以从历史记录里复制真实课堂内容来测。</div>
+      <textarea id="cmpText" rows="4" style="margin-top:8px"></textarea>
+      <div class="row"><button id="btnCompare">开始对比</button></div>
+      <div id="cmpOut"></div>
+    </div>
+
+    <div class="sec">
+      <h3>存储</h3>
+      <div class="hint" id="storageInfo"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtT = sec => { sec = Math.max(0, Math.floor(sec)); const h = Math.floor(sec/3600), m = Math.floor(sec%3600/60), s = sec%60; const p = n => String(n).padStart(2,'0'); return h ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`; };
+
+let toastTimer;
+function toast(msg, ms = 3500){ const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.display = 'none', ms); }
+
+/* ================= settings ================= */
+const DEFAULT_GLOSSARY = `# HVAC / 燃气常用词，可自行增删
+manifold pressure = 歧管压力
+inlet pressure = 进气压力
+water column = 水柱（压力单位）
+manometer = 压力计
+static pressure = 静压
+heat exchanger = 热交换器
+flue = 烟道
+vent connector = 排烟连接管
+draft hood = 防倒风罩
+induced draft = 引风
+inducer motor = 引风电机
+pressure switch = 压力开关
+limit switch = 限温开关
+rollout switch = 火焰溢出开关
+flame sensor = 火焰传感器
+flame rod = 火焰棒
+hot surface igniter = 热表面点火器
+pilot = 长明火
+thermocouple = 热电偶
+thermopile = 热电堆
+gas valve = 燃气阀
+regulator = 调压器
+sediment trap = 沉积物收集管
+drip leg = 集液管
+combustion air = 燃烧空气
+dilution air = 稀释空气
+carbon monoxide = 一氧化碳
+condensate trap = 冷凝水存水弯
+high efficiency furnace = 高效炉
+appliance = 燃气器具
+BTU = BTU
+B149.1 = B149.1 燃气安装规范
+TSSA = TSSA（安省技术标准与安全局）
+CSA = CSA
+G2 = G2
+G3 = G3`;
+
+const PROVIDERS = [
+  {id:'groq-qwen',   name:'Qwen3-32B · Groq',     kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'qwen/qwen3-32b', extra:{reasoning_effort:'none'}, suffix:' /no_think'},
+  {id:'gemini-lite', name:'Gemini Flash-Lite',    kind:'gemini', keyName:'gemini', model:'gemini-2.5-flash-lite'},
+  {id:'groq-gptoss', name:'gpt-oss-120b · Groq',  kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'openai/gpt-oss-120b', extra:{reasoning_effort:'low'}},
+  {id:'sf-qwen8b',   name:'Qwen3-8B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'Qwen/Qwen3-8B', extra:{enable_thinking:false}},
+  {id:'sf-glm',      name:'GLM-4-9B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'THUDM/GLM-4-9B-0414'},
+  {id:'groq-llama70',name:'Llama 3.3 70B · Groq', kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'llama-3.3-70b-versatile'},
+  {id:'groq-llama8', name:'Llama 3.1 8B · Groq',  kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'llama-3.1-8b-instant'},
+];
+
+const DEFAULTS = {
+  keys:{groq:'', gemini:'', sf:''},
+  asrModel:'whisper-large-v3',
+  models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
+  glossary:DEFAULT_GLOSSARY,
+  showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3,
+};
+let S;
+function loadSettings(){
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('lt.settings') || '{}'); } catch(e){}
+  S = Object.assign({}, DEFAULTS, saved);
+  S.keys = Object.assign({}, DEFAULTS.keys, saved.keys || {});
+  S.enabled = Object.assign({}, DEFAULTS.enabled, saved.enabled || {});
+  S.models = Object.assign({}, saved.models || {});
+}
+function saveSettings(){ try { localStorage.setItem('lt.settings', JSON.stringify(S)); } catch(e){ toast('设置保存失败：' + e.message); } }
+const modelOf = p => (S.models[p.id] || p.model).trim();
+
+function applyDisplay(){
+  document.documentElement.style.setProperty('--fs', S.fontSize + 'px');
+  document.documentElement.style.setProperty('--zh-op', S.zhOpacity);
+  document.body.classList.toggle('hide-zh', !S.showZh);
+  $('#togZh').checked = S.showZh;
+}
+
+/* glossary */
+function parseGlossary(){
+  return S.glossary.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => {
+    const [en, zh] = l.split(/\s*[=＝|]\s*/);
+    return {en:(en||'').trim(), zh:(zh||'').trim()};
+  }).filter(g => g.en);
+}
+function termRegex(t){ return new RegExp('(^|[^A-Za-z0-9])' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=$|[^A-Za-z0-9])', 'i'); }
+function glossaryFor(text){ return parseGlossary().filter(g => g.zh && termRegex(g.en).test(text)); }
+
+/* ================= IndexedDB ================= */
+const DB = {
+  db:null,
+  open(){
+    if (this.db) return Promise.resolve(this.db);
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('lecture-translator', 1);
+      r.onupgradeneeded = () => {
+        const d = r.result;
+        d.createObjectStore('sessions', {keyPath:'id'});
+        d.createObjectStore('chunks', {keyPath:'key'}).createIndex('session', 'sessionId');
+      };
+      r.onsuccess = () => { this.db = r.result; res(this.db); };
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async run(store, mode, fn){
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const t = db.transaction(store, mode); let out;
+      const r = fn(t.objectStore(store));
+      if (r) r.onsuccess = () => { out = r.result; };
+      t.oncomplete = () => res(out); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+    });
+  },
+  putSession(s){ return this.run('sessions', 'readwrite', st => st.put(s)); },
+  getSession(id){ return this.run('sessions', 'readonly', st => st.get(id)); },
+  allSessions(){ return this.run('sessions', 'readonly', st => st.getAll()); },
+  putChunk(sessionId, idx, blob){ return this.run('chunks', 'readwrite', st => st.put({key:sessionId + ':' + String(idx).padStart(6,'0'), sessionId, idx, blob})); },
+  async getChunks(sessionId){
+    const all = await this.run('chunks', 'readonly', st => st.index('session').getAll(sessionId));
+    return (all || []).sort((a,b) => a.idx - b.idx).map(c => c.blob);
+  },
+  async deleteSession(id){
+    await this.run('sessions', 'readwrite', st => st.delete(id));
+    const db = await this.open();
+    await new Promise((res, rej) => {
+      const t = db.transaction('chunks', 'readwrite');
+      const r = t.objectStore('chunks').index('session').openCursor(IDBKeyRange.only(id));
+      r.onsuccess = () => { const c = r.result; if (c){ c.delete(); c.continue(); } };
+      t.oncomplete = res; t.onerror = () => rej(t.error);
+    });
+  }
+};
+
+/* ================= HTTP helpers ================= */
+async function fetchT(url, opts, ms = 25000){
+  const ac = new AbortController(); const tm = setTimeout(() => ac.abort(), ms);
+  try { return await fetch(url, Object.assign({}, opts, {signal:ac.signal})); }
+  finally { clearTimeout(tm); }
+}
+function parseDur(s){ let ms = 0, x; const re = /([\d.]+)(ms|h|m|s)/g; while ((x = re.exec(s))){ const v = +x[1]; ms += x[2]==='h' ? v*3600e3 : x[2]==='m' ? v*60e3 : x[2]==='s' ? v*1000 : v; } return ms; }
+async function httpErr(res){
+  let body = ''; try { body = await res.text(); } catch(e){}
+  const e = new Error(`HTTP ${res.status} ${body.slice(0, 200)}`);
+  e.status = res.status; e.body = body;
+  const h = res.headers.get('retry-after');
+  if (h && !isNaN(+h)) e.retryAfter = +h * 1000;
+  let m = body.match(/try again in\s+([\d.hms]+)/i); if (m) e.retryAfter = parseDur(m[1]);
+  m = body.match(/"retryDelay"\s*:\s*"([\d.]+)s"/); if (m) e.retryAfter = +m[1] * 1000;
+  return e;
+}
+const netMsg = e => e.name === 'AbortError' ? '超时' : (e.status ? e.message : '网络错误（可能是断网或浏览器拦截）');
+
+/* ================= ASR (Groq Whisper) ================= */
+const HALLU = /^(thank you\.?|thanks( for watching)?\.?|you|bye\.?|okay\.?|so\.?|um\.?|uh\.?|\.+|subtitles by.*|.*amara\.org.*)$/i;
+
+function encodeWav(chunks, len, rate){
+  const merged = new Float32Array(len); let o = 0;
+  for (const c of chunks){ merged.set(c, o); o += c.length; }
+  const ratio = rate / 16000, outLen = Math.floor(len / ratio);
+  const buf = new ArrayBuffer(44 + outLen * 2), dv = new DataView(buf);
+  const ws = (p, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(p + i, s.charCodeAt(i)); };
+  ws(0,'RIFF'); dv.setUint32(4, 36 + outLen*2, true); ws(8,'WAVE'); ws(12,'fmt ');
+  dv.setUint32(16,16,true); dv.setUint16(20,1,true); dv.setUint16(22,1,true);
+  dv.setUint32(24,16000,true); dv.setUint32(28,32000,true); dv.setUint16(32,2,true); dv.setUint16(34,16,true);
+  ws(36,'data'); dv.setUint32(40, outLen*2, true);
+  for (let i = 0; i < outLen; i++){
+    const s = Math.floor(i * ratio), e = Math.min(len, Math.floor((i + 1) * ratio));
+    let sum = 0; for (let j = s; j < e; j++) sum += merged[j];
+    let v = e > s ? sum / (e - s) : merged[s] || 0;
+    v = Math.max(-1, Math.min(1, v));
+    dv.setInt16(44 + i*2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+  }
+  return new Blob([buf], {type:'audio/wav'});
+}
+
+function whisperPrompt(prevText){
+  let terms = parseGlossary().map(g => g.en).join(', ');
+  if (terms.length > 450) terms = terms.slice(0, 450);
+  const prev = (prevText || '').slice(-200);
+  return (terms ? 'HVAC gas technician lecture. Terms: ' + terms + '. ' : '') + prev;
+}
+
+let lastAsrAt = 0;
+async function transcribe(wav, prompt){
+  for (let attempt = 0; attempt < 6; attempt++){
+    const gap = 3200 - (Date.now() - lastAsrAt);   // 免费层每分钟 20 次
+    if (gap > 0) await sleep(gap);
+    lastAsrAt = Date.now();
+    try {
+      const fd = new FormData();
+      fd.append('file', wav, 'seg.wav');
+      fd.append('model', S.asrModel.trim() || 'whisper-large-v3');
+      fd.append('language', 'en');
+      fd.append('response_format', 'verbose_json');
+      fd.append('temperature', '0');
+      if (prompt) fd.append('prompt', prompt);
+      const res = await fetchT('https://api.groq.com/openai/v1/audio/transcriptions', {method:'POST', headers:{Authorization:'Bearer ' + S.keys.groq.trim()}, body:fd}, 30000);
+      if (!res.ok) throw await httpErr(res);
+      const j = await res.json();
+      const segs = Array.isArray(j.segments) ? j.segments : null;
+      let text = segs
+        ? segs.filter(s => !(s.no_speech_prob > 0.6 && s.avg_logprob < -0.8) && !(s.compression_ratio > 2.6)).map(s => s.text).join(' ')
+        : (j.text || '');
+      text = text.replace(/\s+/g, ' ').trim();
+      if (HALLU.test(text)) text = '';
+      return text;
+    } catch(e){
+      if (e.status === 401 || e.status === 403){ toast('Groq key 无效，请在设置里检查'); throw e; }
+      if (e.status === 400 || e.status === 404){ toast('识别请求出错：' + e.message.slice(0, 120)); throw e; }
+      const wait = e.retryAfter || (e.status === 429 ? 20000 : 3000);
+      setStatus(`识别${e.status === 429 ? '限流' : '出错'}，${Math.ceil(wait/1000)} 秒后重试`);
+      await sleep(Math.min(wait, 120000));
+    }
+  }
+  throw new Error('识别多次失败');
+}
+
+/* ================= Translation ================= */
+const cooldown = {};
+let activeProvider = null;
+
+const SYS_PROMPT = `You are a live interpreter for an HVAC / gas technician college lecture in Ontario, Canada.
+Translate the numbered English lines (speech-recognition output) into natural, concise Simplified Chinese.
+- The recognition may contain errors; use the context and HVAC knowledge to infer what the instructor meant.
+- Use the glossary translations exactly when the terms appear.
+- Keep numbers, units, model names and code references (e.g. B149.1) as written.
+- Output ONLY the translations, one per line, in the format "[n] 译文", same numbering. No notes, no extra text.`;
+
+function buildUser(items, context){
+  const text = items.map(i => i.en).join(' ');
+  const gl = glossaryFor(text + ' ' + context.join(' '));
+  let u = '';
+  if (gl.length) u += 'Glossary:\n' + gl.map(g => `- ${g.en} = ${g.zh}`).join('\n') + '\n\n';
+  if (context.length) u += 'Previous context (do NOT translate):\n' + context.join('\n') + '\n\n';
+  u += 'Translate:\n' + items.map((it, k) => `[${k+1}] ${it.en}`).join('\n');
+  return u;
+}
+
+async function callProvider(p, sys, user){
+  const model = modelOf(p);
+  const key = (S.keys[p.keyName] || '').trim();
+  if (p.kind === 'gemini'){
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+    const body = {systemInstruction:{parts:[{text:sys}]}, contents:[{role:'user', parts:[{text:user}]}],
+      generationConfig:{temperature:0.2, maxOutputTokens:1024, thinkingConfig:{thinkingBudget:0}}};
+    let res = await fetchT(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    if (res.status === 400){ delete body.generationConfig.thinkingConfig; res = await fetchT(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); }
+    if (!res.ok) throw await httpErr(res);
+    const j = await res.json();
+    return ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).map(x => x.text || '').join('');
+  }
+  const body = Object.assign({model, messages:[{role:'system', content:sys}, {role:'user', content:user + (p.suffix || '')}], temperature:0.2, max_tokens:1024}, p.extra || {});
+  const post = b => fetchT(p.base + '/chat/completions', {method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer ' + key}, body:JSON.stringify(b)});
+  let res = await post(body);
+  if (res.status === 400 && p.extra){ const b2 = Object.assign({}, body); for (const k in p.extra) delete b2[k]; res = await post(b2); }
+  if (!res.ok) throw await httpErr(res);
+  const j = await res.json();
+  return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+}
+const cleanOut = s => String(s || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+async function translateWithFallback(sys, user){
+  let lastErr = null;
+  for (const p of PROVIDERS){
+    if (!S.enabled[p.id] || !(S.keys[p.keyName] || '').trim()) continue;
+    if ((cooldown[p.id] || 0) > Date.now()) continue;
+    try {
+      const out = cleanOut(await callProvider(p, sys, user));
+      if (!out) throw new Error('空结果');
+      activeProvider = p; updateProv();
+      return out;
+    } catch(e){
+      lastErr = e;
+      let wait = e.retryAfter || (e.status === 429 ? 60e3 : (e.status === 401 || e.status === 403) ? 3600e3 : (e.status === 400 || e.status === 404) ? 600e3 : 20e3);
+      if (/per.?day|daily|RPD|TPD/i.test(e.body || '')) wait = Math.max(wait, 15 * 60e3);
+      cooldown[p.id] = Date.now() + wait;
+      console.warn(p.name, e);
+    }
+  }
+  throw lastErr || new Error('没有可用的翻译模型（检查 key 和开关）');
+}
+
+function parseNumbered(out, n){
+  const res = new Array(n).fill('');
+  let hit = 0;
+  for (const l of out.split('\n')){
+    const m = l.match(/^\s*\[(\d+)\]\s*(.*)$/);
+    if (m){ const k = +m[1] - 1; if (k >= 0 && k < n){ res[k] = (res[k] ? res[k] + ' ' : '') + m[2].trim(); hit++; } }
+  }
+  if (!hit) res[0] = out.replace(/\s*\n\s*/g, ' ');
+  return res;
+}
+
+/* ================= Live session ================= */
+const L = {
+  state:'idle', save:true, session:null, lines:[], nextId:1,
+  stream:null, ctx:null, src:null, proc:null, sink:null,
+  recorder:null, chunkIdx:0, recStopped:null,
+  frames:0, rate:48000, seg:null, noise:0.004, hidden:false,
+};
+
+const Q = { asr:[], asrBusy:false, trBusy:false };
+
+function setStatus(msg){ $('#prov').textContent = msg; }
+function updateProv(){
+  if (L.state === 'idle'){ setStatus(''); return; }
+  setStatus(activeProvider ? '翻译：' + activeProvider.name : '');
+}
+
+function pickMime(){
+  if (!window.MediaRecorder) return '';
+  return ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/aac'].find(m => { try { return MediaRecorder.isTypeSupported(m); } catch(e){ return false; } }) || '';
+}
+
+let wakeLock = null, wakeHinted = false;
+async function keepAwake(on){
+  try {
+    if (on && 'wakeLock' in navigator){ wakeLock = await navigator.wakeLock.request('screen'); }
+    else if (!on && wakeLock){ await wakeLock.release(); wakeLock = null; }
+  } catch(e){}
+  if (on && !('wakeLock' in navigator) && !wakeHinted){ wakeHinted = true; toast('这个系统版本网页不能自动保持亮屏：请把 设置→显示与亮度→自动锁定 改成"永不"', 7000); }
+}
+
+async function start(){
+  if (!S.keys.groq.trim()){ toast('先在设置里填 Groq key'); openPanel('#pSettings'); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:true, autoGainControl:true, channelCount:1}});
+  } catch(e){ toast('拿不到麦克风权限：' + e.message); return; }
+
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  if (ctx.state !== 'running') { try { await ctx.resume(); } catch(e){} }
+  Object.assign(L, {stream, ctx, rate:ctx.sampleRate, frames:0, seg:null, noise:0.004, lines:[], nextId:1, save:$('#togSave').checked, hidden:false});
+  L.src = ctx.createMediaStreamSource(stream);
+  L.proc = ctx.createScriptProcessor(4096, 1, 1);
+  L.sink = ctx.createGain(); L.sink.gain.value = 0;
+  L.proc.onaudioprocess = ev => onFrame(ev.inputBuffer.getChannelData(0));
+  L.src.connect(L.proc); L.proc.connect(L.sink); L.sink.connect(ctx.destination);
+
+  $('#subs').innerHTML = ''; stick = true;
+
+  if (L.save){
+    const now = new Date();
+    const mime = pickMime();
+    L.session = {id:'s' + now.getTime(), title:defaultTitle(now), createdAt:now.getTime(), duration:0, mime, lines:[], status:'recording'};
+    try { await DB.putSession(L.session); } catch(e){ toast('本地存储不可用，这次不保存：' + e.message); L.save = false; L.session = null; }
+    if (L.save && mime){
+      try {
+        L.chunkIdx = 0;
+        L.recorder = new MediaRecorder(stream, {mimeType:mime, audioBitsPerSecond:48000});
+        const sid = L.session.id;
+        let pending = Promise.resolve();
+        L.recorder.ondataavailable = e => { if (e.data && e.data.size){ const idx = L.chunkIdx++; pending = pending.then(() => DB.putChunk(sid, idx, e.data)).catch(err => toast('录音块保存失败：' + err.message)); } };
+        L.recStopped = new Promise(r => { L.recorder.onstop = () => pending.then(r, r); });
+        L.recorder.start(10000);
+      } catch(e){ toast('录音功能启动失败，只保存文字：' + e.message); L.recorder = null; }
+    } else if (L.save && !mime){ toast('这个浏览器不支持录音，只保存文字'); }
+  } else { L.session = null; L.recorder = null; }
+
+  L.state = 'running';
+  keepAwake(true);
+  updateButtons(); updateProv();
+}
+
+function defaultTitle(d){ const p = n => String(n).padStart(2,'0'); return `${d.getMonth()+1}月${d.getDate()}日 ${p(d.getHours())}:${p(d.getMinutes())}`; }
+
+function pause(){
+  if (L.state !== 'running') return;
+  flushSeg();
+  L.state = 'paused';
+  try { if (L.recorder && L.recorder.state === 'recording') L.recorder.pause(); } catch(e){}
+  $('#level i').style.width = '0';
+  updateButtons();
+}
+function resume(){
+  if (L.state !== 'paused') return;
+  if (L.ctx.state !== 'running') L.ctx.resume();
+  try { if (L.recorder && L.recorder.state === 'paused') L.recorder.resume(); } catch(e){}
+  L.state = 'running';
+  updateButtons();
+}
+
+async function end(){
+  if (L.state === 'idle') return;
+  if (L.state === 'running') flushSeg();
+  L.state = 'idle';
+  updateButtons(); keepAwake(false);
+  try { L.proc.disconnect(); L.src.disconnect(); L.sink.disconnect(); } catch(e){}
+  L.stream.getTracks().forEach(t => t.stop());
+  try { await L.ctx.close(); } catch(e){}
+  $('#level i').style.width = '0';
+  const sess = L.session;
+  if (L.recorder){ try { if (L.recorder.state !== 'inactive') L.recorder.stop(); await L.recStopped; } catch(e){} L.recorder = null; }
+  if (sess){
+    sess.duration = L.frames / L.rate; sess.status = 'done';
+    await persistNow(sess);
+    toast('已保存到历史记录。还在翻译的句子完成后会自动补存。');
+  }
+  updateProv();
+}
+
+/* VAD + segmenting */
+function onFrame(f){
+  if (L.state !== 'running') return;
+  const n = f.length, t = L.frames / L.rate; L.frames += n;
+  let sum = 0; for (let i = 0; i < n; i++) sum += f[i] * f[i];
+  const rms = Math.sqrt(sum / n);
+  const sensMul = [2.2, 1.6, 1.2, 0.9, 0.65][(S.sensitivity|0) - 1] || 1.2;
+  const thr = Math.max(0.006, L.noise * 2.8) * sensMul;
+  const speech = rms > thr;
+  if (rms < L.noise * 2 || rms < 0.004) L.noise = L.noise * 0.98 + rms * 0.02; else L.noise = L.noise * 0.9995 + rms * 0.0005;
+  $('#level i').style.width = Math.min(100, rms * 900) + '%';
+  $('#clock').textContent = fmtT(L.frames / L.rate);
+
+  if (!L.seg) L.seg = {chunks:[], len:0, startT:t, speech:0, silence:0};
+  const s = L.seg, dur = n / L.rate;
+  s.chunks.push(new Float32Array(f)); s.len += n;
+  if (speech){ s.speech += dur; s.silence = 0; } else s.silence += dur;
+  if (s.speech === 0){ // 只保留开头 0.3 秒的静音
+    while (s.chunks.length > 1 && (s.len - s.chunks[0].length) / L.rate > 0.3){ const c = s.chunks.shift(); s.len -= c.length; s.startT += c.length / L.rate; }
+    return;
+  }
+  const segDur = s.len / L.rate;
+  if ((segDur >= 4 && s.silence >= 0.45) || segDur >= 12 || (segDur >= 1.5 && s.silence >= 1.4)) flushSeg();
+}
+
+function flushSeg(){
+  const s = L.seg; L.seg = null;
+  if (!s || s.speech < 0.4) return;
+  const line = {id:L.nextId++, t:s.startT, en:'', zh:'', status:'asr'};
+  L.lines.push(line); renderLine(line);
+  Q.asr.push({line, wav:encodeWav(s.chunks, s.len, L.rate), session:L.session, lines:L.lines});
+  runAsr();
+}
+
+async function runAsr(){
+  if (Q.asrBusy) return; Q.asrBusy = true;
+  try {
+    while (Q.asr.length){
+      const job = Q.asr.shift(), line = job.line;
+      const prev = job.lines.filter(l => l.en && l.id < line.id).slice(-2).map(l => l.en).join(' ');
+      try {
+        const text = await transcribe(job.wav, whisperPrompt(prev));
+        if (!text){ removeLine(job, line); continue; }
+        line.en = text; line.status = 'tr';
+      } catch(e){ line.en = '（识别失败）'; line.status = 'err'; line.zh = netMsg(e); }
+      renderLine(line); dirty(job.session, job.lines);
+      if (line.status === 'tr'){ Q.tr.push({line, session:job.session, lines:job.lines}); runTr(); }
+      updateProv();
+    }
+  } finally { Q.asrBusy = false; }
+}
+Q.tr = [];
+
+function removeLine(job, line){
+  const i = job.lines.indexOf(line); if (i >= 0) job.lines.splice(i, 1);
+  const el = document.getElementById('ln' + line.id); if (el && job.lines === L.lines) el.remove();
+}
+
+async function runTr(){
+  if (Q.trBusy) return; Q.trBusy = true;
+  try {
+    while (Q.tr.length){
+      const batch = Q.tr.splice(0, 3);
+      const lines = batch[0].lines;
+      const firstIdx = lines.indexOf(batch[0].line);
+      const context = lines.slice(Math.max(0, firstIdx - 3), Math.max(0, firstIdx)).filter(l => l.en && l.status === 'done').map(l => l.en);
+      const items = batch.map(b => b.line);
+      try {
+        const out = await translateWithFallback(SYS_PROMPT, buildUser(items, context));
+        const zh = parseNumbered(out, items.length);
+        items.forEach((l, k) => { l.zh = zh[k] || '（漏译）'; l.status = 'done'; });
+      } catch(e){
+        if (Q.tr.length > 40 || !items.every(l => (l.tries = (l.tries || 0) + 1) < 4)){
+          items.forEach(l => { l.status = 'err'; l.zh = '翻译失败：' + netMsg(e); });
+        } else {
+          Q.tr.unshift(...batch);
+          setStatus('翻译暂时都不可用，稍后重试');
+          await sleep(8000); continue;
+        }
+      }
+      items.forEach(renderLine);
+      batch.forEach(b => dirty(b.session, b.lines));
+    }
+  } finally { Q.trBusy = false; }
+}
+
+/* persistence */
+const dirtyTimers = new Map();
+function dirty(sess, lines){
+  if (!sess) return;
+  sess.lines = lines.map(l => ({t:l.t, en:l.en, zh:l.zh}));
+  if (dirtyTimers.has(sess.id)) return;
+  dirtyTimers.set(sess.id, setTimeout(() => { dirtyTimers.delete(sess.id); persistNow(sess); }, 3000));
+}
+async function persistNow(sess){
+  if (L.session === sess && L.state !== 'idle') sess.duration = L.frames / L.rate;
+  try { await DB.putSession(sess); } catch(e){ toast('保存失败：' + e.message); }
+}
+
+/* ================= rendering ================= */
+let stick = true;
+function lineHtml(l){
+  const zh = l.status === 'tr' ? '翻译中…' : l.status === 'asr' ? '' : l.zh;
+  return `<div class="t">${fmtT(l.t)}</div><div class="en">${l.status === 'asr' ? '识别中…' : esc(l.en)}</div><div class="zh">${esc(zh)}</div>`;
+}
+function renderLine(l){
+  const box = $('#subs');
+  if (!L.lines.includes(l)) return;
+  const empty = box.querySelector('.empty'); if (empty) empty.remove();
+  let el = document.getElementById('ln' + l.id);
+  if (!el){ el = document.createElement('div'); el.id = 'ln' + l.id; box.appendChild(el); }
+  el.className = 'line ' + l.status;
+  el.innerHTML = lineHtml(l);
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+$('#subs').addEventListener('scroll', () => {
+  const b = $('#subs');
+  stick = b.scrollTop + b.clientHeight >= b.scrollHeight - 60;
+  $('#jump').style.display = stick ? 'none' : 'block';
+});
+$('#jump').onclick = () => { const b = $('#subs'); b.scrollTop = b.scrollHeight; };
+
+function updateButtons(){
+  const st = L.state;
+  $('#btnStart').style.display = st === 'idle' ? '' : 'none';
+  $('#btnPause').style.display = st === 'idle' ? 'none' : '';
+  $('#btnEnd').style.display = st === 'idle' ? 'none' : '';
+  $('#btnPause').textContent = st === 'paused' ? '继续' : '暂停';
+  $('#togSave').disabled = st !== 'idle';
+  if (st === 'idle') $('#clock').textContent = '00:00';
+}
+
+/* ================= panels ================= */
+function openPanel(sel){ $(sel).classList.add('show'); if (sel === '#pSettings') fillSettings(); if (sel === '#pHistory') renderHistory(); }
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => {
+  const p = b.closest('.panel'); p.classList.remove('show');
+  if (p.id === 'pSession'){ const a = $('#player'); a.pause(); if (a.src) URL.revokeObjectURL(a.src); a.removeAttribute('src'); }
+});
+
+/* history */
+async function renderHistory(){
+  const box = $('#histList');
+  let list = [];
+  try { list = (await DB.allSessions()) || []; } catch(e){ box.innerHTML = '<div class="hint">读取失败：' + esc(e.message) + '</div>'; return; }
+  list.sort((a, b) => b.createdAt - a.createdAt);
+  if (!list.length){ box.innerHTML = '<div class="empty">还没有记录</div>'; return; }
+  box.innerHTML = list.map(s => `<div class="sess" data-id="${s.id}"><div class="info"><div class="nm">${esc(s.title)}</div>
+    <div class="meta">${new Date(s.createdAt).toLocaleString()} · ${fmtT(s.duration || 0)} · ${(s.lines || []).length} 句${s.status === 'interrupted' ? ' · 意外中断' : (s.status === 'recording' && L.session && L.session.id === s.id && L.state !== 'idle') ? ' · 正在录' : ''}</div></div><button>打开</button></div>`).join('');
+  box.querySelectorAll('.sess').forEach(el => el.onclick = () => openSession(el.dataset.id));
+}
+
+let curSess = null;
+async function openSession(id){
+  curSess = await DB.getSession(id); if (!curSess) return;
+  $('#sessTitle').textContent = curSess.title;
+  const a = $('#player'); a.removeAttribute('src');
+  const chunks = await DB.getChunks(id);
+  $('#btnExportAudio').disabled = !chunks.length;
+  if (chunks.length){
+    const blob = new Blob(chunks, {type:(curSess.mime || 'audio/mp4').split(';')[0]});
+    a.src = URL.createObjectURL(blob); a.style.display = '';
+    a.onloadedmetadata = () => { if (a.duration === Infinity){ a.currentTime = 1e7; a.ontimeupdate = () => { a.ontimeupdate = null; a.currentTime = 0; }; } };
+  } else a.style.display = 'none';
+  const box = $('#sessLines');
+  box.innerHTML = (curSess.lines || []).map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}</div><div class="en">${esc(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
+  box.querySelectorAll('.line').forEach(el => el.onclick = () => {
+    if (!a.src) return;
+    const l = curSess.lines[+el.dataset.i];
+    box.querySelectorAll('.playing').forEach(x => x.classList.remove('playing')); el.classList.add('playing');
+    a.currentTime = Math.max(0, l.t - 0.3); a.play().catch(() => {});
+  });
+  openPanel('#pSession');
+}
+$('#btnRename').onclick = async () => {
+  if (!curSess) return;
+  const t = prompt('新名字', curSess.title); if (!t) return;
+  curSess.title = t.trim(); $('#sessTitle').textContent = curSess.title;
+  if (L.session && L.session.id === curSess.id) L.session.title = curSess.title;
+  await DB.putSession(curSess);
+};
+$('#btnDelete').onclick = async () => {
+  if (!curSess) return;
+  if (L.session && L.session.id === curSess.id && L.state !== 'idle'){ toast('正在录的这节不能删'); return; }
+  if (!confirm('删除「' + curSess.title + '」的文字和录音？删了找不回来。')) return;
+  await DB.deleteSession(curSess.id);
+  $('#pSession').classList.remove('show'); renderHistory();
+};
+const safeName = s => s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_');
+async function shareOrDownload(blob, filename){
+  const file = new File([blob], filename, {type:blob.type});
+  if (navigator.canShare && navigator.canShare({files:[file]})){
+    try { await navigator.share({files:[file]}); return; } catch(e){ if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+}
+$('#btnExportTxt').onclick = () => {
+  if (!curSess) return;
+  const head = `${curSess.title}\n${new Date(curSess.createdAt).toLocaleString()}  时长 ${fmtT(curSess.duration || 0)}\n\n`;
+  const body = (curSess.lines || []).map(l => `[${fmtT(l.t)}] ${l.en}\n${l.zh}\n`).join('\n');
+  shareOrDownload(new Blob([head + body], {type:'text/plain;charset=utf-8'}), safeName(curSess.title) + '.txt');
+};
+$('#btnExportAudio').onclick = async () => {
+  if (!curSess) return;
+  const chunks = await DB.getChunks(curSess.id); if (!chunks.length) return;
+  const type = (curSess.mime || 'audio/mp4').split(';')[0];
+  shareOrDownload(new Blob(chunks, {type}), safeName(curSess.title) + (type.includes('webm') ? '.webm' : '.m4a'));
+};
+
+/* settings */
+function fillSettings(){
+  $('#kGroq').value = S.keys.groq; $('#kGemini').value = S.keys.gemini; $('#kSf').value = S.keys.sf;
+  $('#asrModel').value = S.asrModel; $('#sens').value = S.sensitivity; $('#sensV').textContent = S.sensitivity;
+  $('#glossary').value = S.glossary;
+  $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
+  $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
+  $('#saveDefault').checked = S.saveDefault;
+  if (!$('#cmpText').value) $('#cmpText').value = 'Before you light the furnace, check the inlet and manifold pressure with a manometer, and make sure the inducer motor proves the pressure switch.';
+  $('#provList').innerHTML = PROVIDERS.map(p => {
+    const cd = (cooldown[p.id] || 0) - Date.now();
+    const st = !(S.keys[p.keyName] || '').trim() ? '没填 key' : cd > 0 ? `限流中，约 ${Math.ceil(cd/60000)} 分钟后恢复` : '可用';
+    return `<div class="prov"><input type="checkbox" data-en="${p.id}" ${S.enabled[p.id] ? 'checked' : ''} style="width:20px;height:20px">
+      <div><span class="nm">${esc(p.name)}</span> <span class="st">${st}</span></div>
+      <input type="text" data-model="${p.id}" value="${esc(modelOf(p))}"></div>`;
+  }).join('');
+  $('#provList').querySelectorAll('[data-en]').forEach(c => c.onchange = () => { S.enabled[c.dataset.en] = c.checked; saveSettings(); });
+  $('#provList').querySelectorAll('[data-model]').forEach(c => c.onchange = () => {
+    const p = PROVIDERS.find(x => x.id === c.dataset.model); const v = c.value.trim();
+    if (!v || v === p.model) delete S.models[p.id]; else S.models[p.id] = v;
+    cooldown[p.id] = 0; saveSettings();
+  });
+  if (navigator.storage && navigator.storage.estimate){
+    navigator.storage.estimate().then(e => { $('#storageInfo').textContent = `已用约 ${(e.usage/1048576).toFixed(1)} MB，可用约 ${(e.quota/1048576/1024).toFixed(1)} GB。录音一小时大约 10~25 MB。重要的课记得导出备份。`; });
+  }
+}
+const bindKey = (sel, k) => $(sel).onchange = () => { S.keys[k] = $(sel).value.trim(); Object.keys(cooldown).forEach(x => cooldown[x] = 0); saveSettings(); };
+bindKey('#kGroq', 'groq'); bindKey('#kGemini', 'gemini'); bindKey('#kSf', 'sf');
+$('#btnShowKeys').onclick = () => ['#kGroq', '#kGemini', '#kSf'].forEach(s => $(s).type = $(s).type === 'password' ? 'text' : 'password');
+$('#asrModel').onchange = () => { S.asrModel = $('#asrModel').value.trim() || 'whisper-large-v3'; saveSettings(); };
+$('#sens').oninput = () => { S.sensitivity = +$('#sens').value; $('#sensV').textContent = S.sensitivity; saveSettings(); };
+$('#glossary').onchange = () => { S.glossary = $('#glossary').value; saveSettings(); };
+$('#fs').oninput = () => { S.fontSize = +$('#fs').value; $('#fsV').textContent = S.fontSize + 'px'; applyDisplay(); saveSettings(); };
+$('#zhOp').oninput = () => { S.zhOpacity = +$('#zhOp').value; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%'; applyDisplay(); saveSettings(); };
+$('#saveDefault').onchange = () => { S.saveDefault = $('#saveDefault').checked; if (L.state === 'idle') $('#togSave').checked = S.saveDefault; saveSettings(); };
+
+$('#btnCompare').onclick = async () => {
+  const text = $('#cmpText').value.trim(); if (!text) return;
+  const out = $('#cmpOut');
+  const ps = PROVIDERS.filter(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim());
+  if (!ps.length){ out.innerHTML = '<div class="hint">没有可用的模型，先填 key。</div>'; return; }
+  const user = buildUser([{en:text}], []);
+  out.innerHTML = ps.map(p => `<div class="cmp" id="cmp-${p.id}"><b>${esc(p.name)} · 等待中…</b></div>`).join('');
+  await Promise.all(ps.map(async p => {
+    const t0 = performance.now(); const el = document.getElementById('cmp-' + p.id);
+    try {
+      const r = parseNumbered(cleanOut(await callProvider(p, SYS_PROMPT, user)), 1)[0];
+      el.innerHTML = `<b>${esc(p.name)} · ${((performance.now() - t0)/1000).toFixed(1)} 秒</b><div>${esc(r)}</div>`;
+    } catch(e){ el.innerHTML = `<b>${esc(p.name)} · 失败</b><div class="hint">${esc(netMsg(e))}</div>`; }
+  }));
+};
+
+/* ================= wiring ================= */
+$('#btnStart').onclick = start;
+$('#btnPause').onclick = () => L.state === 'paused' ? resume() : pause();
+$('#btnEnd').onclick = () => { if (confirm('结束这次？')) end(); };
+$('#btnHistory').onclick = () => openPanel('#pHistory');
+$('#btnSettings').onclick = () => openPanel('#pSettings');
+$('#togZh').onchange = () => { S.showZh = $('#togZh').checked; applyDisplay(); saveSettings(); };
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden'){ if (L.state === 'running') L.hidden = true; return; }
+  if (L.state !== 'idle'){
+    keepAwake(true);
+    if (L.ctx && L.ctx.state !== 'running') L.ctx.resume().catch(() => {});
+    if (L.hidden){ L.hidden = false; toast('刚才页面切到了后台或锁屏，这段时间可能没有识别到。', 6000); }
+  }
+});
+window.addEventListener('beforeunload', e => { if (L.state !== 'idle'){ e.preventDefault(); e.returnValue = ''; } });
+
+/* app icon for Add to Home Screen */
+(function(){
+  try {
+    const c = document.createElement('canvas'); c.width = c.height = 180;
+    const g = c.getContext('2d'); g.fillStyle = '#1f6b46'; g.fillRect(0, 0, 180, 180);
+    g.fillStyle = '#fff'; g.font = 'bold 104px "PingFang SC", sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('译', 90, 98);
+    const l = document.createElement('link'); l.rel = 'apple-touch-icon'; l.href = c.toDataURL('image/png'); document.head.appendChild(l);
+  } catch(e){}
+})();
+
+/* init */
+loadSettings(); applyDisplay();
+$('#togSave').checked = S.saveDefault;
+updateButtons();
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+DB.allSessions().then(list => { // 上次意外中断的标记一下
+  (list || []).filter(s => s.status === 'recording').forEach(s => { s.status = 'interrupted'; DB.putSession(s); });
+}).catch(() => {});
+if (!S.keys.groq) setTimeout(() => toast('第一次用：点右上角"设置"填 Groq key', 5000), 600);
+</script>
+</body>
+</html>
