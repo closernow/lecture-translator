@@ -127,7 +127,7 @@ a{color:#7fb7ff}
       <button id="btnExportAudio">导出录音</button>
       <button id="btnDelete" style="background:#3a2222">删除</button>
     </div>
-    <div class="hint">点任意一句，录音跳到那里播放。</div>
+    <div class="hint" id="sessHint">点任意一句，录音跳到那里播放。</div>
     <div id="sessLines" class="clickable" style="margin-top:14px"></div>
   </div>
 </div>
@@ -138,7 +138,18 @@ a{color:#7fb7ff}
   <div class="body">
 
     <div class="sec">
-      <h3>API Key（只存在本设备浏览器里）</h3>
+      <h3>云同步（Google Drive）</h3>
+      <div class="hint" id="cloudInfo"></div>
+      <div class="row">
+        <button id="btnCloudLogin">登录 Google 开启同步</button>
+        <button id="btnCloudSync" style="display:none">立即同步</button>
+        <button id="btnCloudOff" style="display:none">关闭同步</button>
+      </div>
+      <div class="hint">同步 API key、识别和翻译设置、术语表、历史记录的文字。录音不同步，只在录制的那台设备上。字号等显示设置每台设备各自保存。数据存在你 Drive 的应用隐藏文件夹里，只有本网页能读。</div>
+    </div>
+
+    <div class="sec">
+      <h3>API Key</h3>
       <div class="row"><label>Groq（必填）</label><input type="password" id="kGroq" autocomplete="off"></div>
       <div class="row"><label>Gemini</label><input type="password" id="kGemini" autocomplete="off"></div>
       <div class="row"><label>硅基流动</label><input type="password" id="kSf" autocomplete="off"></div>
@@ -264,7 +275,15 @@ function loadSettings(){
   S.enabled = Object.assign({}, DEFAULTS.enabled, saved.enabled || {});
   S.models = Object.assign({}, saved.models || {});
 }
-function saveSettings(){ try { localStorage.setItem('lt.settings', JSON.stringify(S)); } catch(e){ toast('设置保存失败：' + e.message); } }
+// 这些跟着账号走，云同步；字号、中文亮度等显示设置每台设备各自保存
+const SYNC_KEYS = ['keys', 'asrModel', 'models', 'enabled', 'glossary', 'sensitivity'];
+const syncPart = () => JSON.stringify(SYNC_KEYS.map(k => S[k]));
+let lastSyncPart = '';
+function saveSettings(){
+  const h = syncPart();
+  if (h !== lastSyncPart){ lastSyncPart = h; S.updatedAt = Date.now(); Cloud.schedule(2000); }
+  try { localStorage.setItem('lt.settings', JSON.stringify(S)); } catch(e){ toast('设置保存失败：' + e.message); }
+}
 const modelOf = p => (S.models[p.id] || p.model).trim();
 
 function applyDisplay(){
@@ -309,7 +328,10 @@ const DB = {
       t.oncomplete = () => res(out); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
     });
   },
-  putSession(s){ return this.run('sessions', 'readwrite', st => st.put(s)); },
+  putSession(s, fromCloud){
+    if (!fromCloud){ s.updatedAt = Date.now(); if (!s.device) s.device = DEVICE_ID; Cloud.schedule(L.state === 'idle' ? 3000 : 30000); }
+    return this.run('sessions', 'readwrite', st => st.put(s));
+  },
   getSession(id){ return this.run('sessions', 'readonly', st => st.get(id)); },
   allSessions(){ return this.run('sessions', 'readonly', st => st.getAll()); },
   putChunk(sessionId, idx, blob){ return this.run('chunks', 'readwrite', st => st.put({key:sessionId + ':' + String(idx).padStart(6,'0'), sessionId, idx, blob})); },
@@ -697,6 +719,178 @@ async function persistNow(sess){
   try { await DB.putSession(sess); } catch(e){ toast('保存失败：' + e.message); }
 }
 
+/* ================= cloud sync (Google Drive appDataFolder) ================= */
+// Google Cloud Console 里建的 OAuth 客户端 ID（网页应用），公开的，可以放在代码里
+const GOOGLE_CLIENT_ID = '';
+const DEVICE_ID = (() => { let d = localStorage.getItem('lt.device'); if (!d){ d = Math.random().toString(36).slice(2, 10); localStorage.setItem('lt.device', d); } return d; })();
+const lsGet = (k, def) => { try { return JSON.parse(localStorage.getItem(k)) ?? def; } catch(e){ return def; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} };
+
+const Cloud = {
+  // st: {on, token, exp, email, lastSync}；synced: 已经上过云的记录 id；del: 还没从云端删掉的记录 id
+  st:lsGet('lt.cloud', {}), synced:new Set(lsGet('lt.synced', [])), del:lsGet('lt.cloudDel', []),
+  busy:false, again:false, timer:null, msg:'',
+  save(){ lsSet('lt.cloud', this.st); lsSet('lt.synced', [...this.synced]); lsSet('lt.cloudDel', this.del); },
+  ready(){ return !!(this.st.on && this.st.token && this.st.exp > Date.now()); },
+  redirectUri(){ return location.origin + location.pathname.replace(/index\.html$/, ''); },
+
+  login(silent){
+    if (!GOOGLE_CLIENT_ID){ toast('还没配置 Google 客户端 ID'); return; }
+    const state = Math.random().toString(36).slice(2);
+    lsSet('lt.oauth', {state, silent:!!silent});
+    const p = new URLSearchParams({client_id:GOOGLE_CLIENT_ID, redirect_uri:this.redirectUri(), response_type:'token',
+      scope:'https://www.googleapis.com/auth/drive.appdata email', state, include_granted_scopes:'true'});
+    if (silent){ p.set('prompt', 'none'); if (this.st.email) p.set('login_hint', this.st.email); }
+    location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + p;
+  },
+  // 登录跳回来时，地址栏 # 后面带着 token
+  async handleRedirect(){
+    if (!/[#&]state=/.test(location.hash)) return;
+    const h = new URLSearchParams(location.hash.slice(1));
+    history.replaceState(null, '', location.pathname + location.search);
+    const o = lsGet('lt.oauth', {}); localStorage.removeItem('lt.oauth');
+    if (!o.state || h.get('state') !== o.state) return;
+    if (h.get('access_token')){
+      Object.assign(this.st, {on:true, token:h.get('access_token'), exp:Date.now() + (+h.get('expires_in') - 120) * 1000});
+      try {
+        const r = await fetchT('https://oauth2.googleapis.com/tokeninfo?access_token=' + encodeURIComponent(this.st.token), {});
+        if (r.ok){ const j = await r.json(); if (j.email) this.st.email = j.email; }
+      } catch(e){}
+      this.save();
+      if (!o.silent) toast('已登录 Google，开始同步');
+    } else if (!o.silent) toast('Google 登录没有完成：' + (h.get('error') || ''));
+  },
+  // 打开网页时 token 过期了，就悄悄跳一趟 Google 换新的（不用点任何东西）；正在录或还有句子在翻译时不跳
+  autoRenew(){
+    if (!this.st.on || this.ready() || L.state !== 'idle' || Q.asr.length || Q.tr.length || Q.asrBusy || Q.trBusy) return false;
+    const last = +localStorage.getItem('lt.silentAt') || 0;
+    if (Date.now() - last < 10 * 60e3) return false;   // 静默登录失败过，10 分钟内不再试，免得来回跳
+    localStorage.setItem('lt.silentAt', Date.now());
+    this.login(true);
+    return true;
+  },
+  logout(){ this.st = {}; this.synced.clear(); this.del = []; this.save(); renderCloud(); },
+
+  async api(method, url, opts = {}){
+    const res = await fetchT(url, Object.assign({method}, opts, {headers:Object.assign({Authorization:'Bearer ' + this.st.token}, opts.headers || {})}), 30000);
+    if (res.status === 401){ this.st.token = ''; this.save(); }
+    if (!res.ok) throw await httpErr(res);
+    return res;
+  },
+  async list(){
+    let files = [], page = '';
+    do {
+      const r = await this.api('GET', 'https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&pageSize=1000&fields=nextPageToken,files(id,name,appProperties)' + (page ? '&pageToken=' + page : ''));
+      const j = await r.json(); files = files.concat(j.files || []); page = j.nextPageToken || '';
+    } while (page);
+    return files;
+  },
+  async download(id){ return (await this.api('GET', `https://www.googleapis.com/drive/v3/files/${id}?alt=media`)).json(); },
+  async upload(id, name, data, updatedAt){
+    const meta = {appProperties:{u:String(updatedAt || 0)}};
+    if (!id){ meta.name = name; meta.parents = ['appDataFolder']; }
+    const b = 'lt' + Math.random().toString(36).slice(2);
+    const body = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(data)}\r\n--${b}--`;
+    await this.api(id ? 'PATCH' : 'POST', 'https://www.googleapis.com/upload/drive/v3/files' + (id ? '/' + id : '') + '?uploadType=multipart',
+      {headers:{'Content-Type':'multipart/related; boundary=' + b}, body:new Blob([body])});
+  },
+
+  schedule(ms){
+    if (!this.st.on) return;
+    const due = Date.now() + ms;
+    if (this.timer && this.due <= due) return;   // 已经约了更早的就不往后推（录课时每几秒存一次）
+    clearTimeout(this.timer); this.due = due;
+    this.timer = setTimeout(() => { this.timer = null; this.sync(); }, ms);
+  },
+  async sync(){
+    if (!this.st.on) return;
+    if (!this.ready()){ this.msg = '登录已过期，点"立即同步"重新登录'; renderCloud(); return; }
+    if (this.busy){ this.again = true; return; }
+    this.busy = true; this.msg = '同步中…'; renderCloud();
+    try {
+      do { this.again = false; await this.syncOnce(); } while (this.again);
+      this.st.lastSync = Date.now(); this.msg = ''; this.save();
+    } catch(e){
+      this.msg = e.status === 401 ? '登录已过期，点"立即同步"重新登录' : '同步失败：' + netMsg(e);
+      console.warn('cloud', e);
+    } finally { this.busy = false; renderCloud(); }
+  },
+  async syncOnce(){
+    const files = await this.list();
+    const byName = new Map(files.map(f => [f.name, f]));
+    const fu = f => +((f.appProperties && f.appProperties.u) || 0);
+    let changed = false;
+
+    // 设置：谁的 updatedAt 新用谁的
+    const sf = byName.get('settings.json');
+    if (sf && fu(sf) > (S.updatedAt || 0)){
+      const r = await this.download(sf.id);
+      SYNC_KEYS.forEach(k => { if (r[k] !== undefined) S[k] = r[k]; });
+      S.updatedAt = fu(sf); lastSyncPart = syncPart();
+      try { localStorage.setItem('lt.settings', JSON.stringify(S)); } catch(e){}
+      Object.keys(cooldown).forEach(x => cooldown[x] = 0);
+      if ($('#pSettings').classList.contains('show')) fillSettings();
+    } else if (!sf || (S.updatedAt || 0) > fu(sf)){
+      if (!S.updatedAt){ S.updatedAt = Date.now(); try { localStorage.setItem('lt.settings', JSON.stringify(S)); } catch(e){} }
+      await this.upload(sf && sf.id, 'settings.json', Object.fromEntries(SYNC_KEYS.map(k => [k, S[k]])), S.updatedAt);
+    }
+
+    // 本机删掉的，云端也删
+    for (const id of this.del.slice()){
+      const f = byName.get('session-' + id + '.json');
+      if (f){ try { await this.api('DELETE', 'https://www.googleapis.com/drive/v3/files/' + f.id); } catch(e){ if (e.status !== 404) throw e; } byName.delete(f.name); }
+      this.del = this.del.filter(x => x !== id); this.synced.delete(id); this.save();
+    }
+
+    // 历史记录：一节课一个文件，谁新用谁的；录音不上传
+    const local = (await DB.allSessions()) || [];
+    const localIds = new Set(local.map(s => s.id));
+    const pack = s => ({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, lines:s.lines || [], updatedAt:s.updatedAt || 0});
+    for (const s0 of local){
+      const live = L.state !== 'idle' && L.session && L.session.id === s0.id;
+      const s = live ? L.session : s0;
+      const name = 'session-' + s.id + '.json', f = byName.get(name);
+      if (!f){
+        if (this.synced.has(s.id) && !live){ await DB.deleteSession(s.id); this.synced.delete(s.id); changed = true; continue; }  // 别的设备删了
+        await this.upload(null, name, pack(s), s.updatedAt);
+      } else if ((s.updatedAt || 0) > fu(f)){
+        await this.upload(f.id, name, pack(s), s.updatedAt);
+      } else if (fu(f) > (s.updatedAt || 0) && !live){
+        const r = await this.download(f.id);
+        await DB.putSession(Object.assign({}, s, r, {mime:s.mime}), true); changed = true;
+      }
+      this.synced.add(s.id);
+    }
+    for (const f of byName.values()){
+      const m = f.name.match(/^session-(.+)\.json$/);
+      if (!m || localIds.has(m[1]) || this.del.includes(m[1])) continue;
+      await DB.putSession(await this.download(f.id), true);
+      this.synced.add(m[1]); changed = true;
+    }
+    this.save();
+    if (changed && $('#pHistory').classList.contains('show')) renderHistory();
+  },
+};
+
+function renderCloud(){
+  const on = !!Cloud.st.on;
+  $('#btnCloudLogin').style.display = on ? 'none' : '';
+  $('#btnCloudSync').style.display = on ? '' : 'none';
+  $('#btnCloudOff').style.display = on ? '' : 'none';
+  let info;
+  if (!GOOGLE_CLIENT_ID) info = '还没配置 Google 客户端 ID，暂时不能用。';
+  else if (!on) info = '没开启。每台设备各自保存。';
+  else info = '已开启' + (Cloud.st.email ? '：' + Cloud.st.email : '') + '。' + (Cloud.msg || (Cloud.st.lastSync ? '上次同步 ' + new Date(Cloud.st.lastSync).toLocaleString() : ''));
+  $('#cloudInfo').textContent = info;
+}
+$('#btnCloudLogin').onclick = () => Cloud.login(false);
+$('#btnCloudSync').onclick = () => {
+  if (Cloud.ready()) return Cloud.sync();
+  if (L.state !== 'idle'){ toast('正在录，结束后再重新登录'); return; }
+  Cloud.login(false);
+};
+$('#btnCloudOff').onclick = () => { if (confirm('关闭云同步？本机数据保留，云端数据也不删。')) Cloud.logout(); };
+
 /* ================= rendering ================= */
 let stick = true;
 function lineHtml(l){
@@ -731,7 +925,11 @@ function updateButtons(){
 }
 
 /* ================= panels ================= */
-function openPanel(sel){ $(sel).classList.add('show'); if (sel === '#pSettings') fillSettings(); if (sel === '#pHistory') renderHistory(); }
+function openPanel(sel){
+  $(sel).classList.add('show');
+  if (sel === '#pSettings'){ fillSettings(); renderCloud(); }
+  if (sel === '#pHistory'){ renderHistory(); Cloud.schedule(0); }
+}
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => {
   const p = b.closest('.panel'); p.classList.remove('show');
   if (p.id === 'pSession'){ const a = $('#player'); a.pause(); if (a.src) URL.revokeObjectURL(a.src); a.removeAttribute('src'); }
@@ -761,6 +959,7 @@ async function openSession(id){
     a.src = URL.createObjectURL(blob); a.style.display = '';
     a.onloadedmetadata = () => { if (a.duration === Infinity){ a.currentTime = 1e7; a.ontimeupdate = () => { a.ontimeupdate = null; a.currentTime = 0; }; } };
   } else a.style.display = 'none';
+  $('#sessHint').textContent = chunks.length ? '点任意一句，录音跳到那里播放。' : (curSess.device && curSess.device !== DEVICE_ID ? '这节在另一台设备上录的，录音在那台设备上。' : '这节没有录音。');
   const box = $('#sessLines');
   box.innerHTML = (curSess.lines || []).map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}</div><div class="en">${esc(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
   box.querySelectorAll('.line').forEach(el => el.onclick = () => {
@@ -783,6 +982,7 @@ $('#btnDelete').onclick = async () => {
   if (L.session && L.session.id === curSess.id && L.state !== 'idle'){ toast('正在录的这节不能删'); return; }
   if (!confirm('删除「' + curSess.title + '」的文字和录音？删了找不回来。')) return;
   await DB.deleteSession(curSess.id);
+  if (Cloud.st.on){ Cloud.del.push(curSess.id); Cloud.save(); Cloud.schedule(1000); }
   $('#pSession').classList.remove('show'); renderHistory();
 };
 const safeName = s => s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_');
@@ -869,6 +1069,7 @@ $('#togZh').onchange = () => { S.showZh = $('#togZh').checked; applyDisplay(); s
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden'){ if (L.state === 'running') L.hidden = true; return; }
+  if (L.state === 'idle' && Cloud.st.on && !Cloud.autoRenew()) Cloud.schedule(500);
   if (L.state !== 'idle'){
     keepAwake(true);
     if (L.ctx && L.ctx.state !== 'running') L.ctx.resume().catch(() => {});
@@ -888,14 +1089,20 @@ window.addEventListener('beforeunload', e => { if (L.state !== 'idle'){ e.preven
 })();
 
 /* init */
-loadSettings(); applyDisplay();
+loadSettings(); lastSyncPart = syncPart(); applyDisplay();
 $('#togSave').checked = S.saveDefault;
 updateButtons();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-DB.allSessions().then(list => { // 上次意外中断的标记一下
-  (list || []).filter(s => s.status === 'recording').forEach(s => { s.status = 'interrupted'; DB.putSession(s); });
+DB.allSessions().then(list => { // 本机上次意外中断的标记一下（别的设备正在录的不管）
+  (list || []).filter(s => s.status === 'recording' && (!s.device || s.device === DEVICE_ID)).forEach(s => { s.status = 'interrupted'; DB.putSession(s); });
 }).catch(() => {});
-if (!S.keys.groq) setTimeout(() => toast('第一次用：点右上角"设置"填 Groq key', 5000), 600);
+(async () => {
+  await Cloud.handleRedirect();
+  if (Cloud.ready()){ localStorage.removeItem('lt.silentAt'); Cloud.sync(); }
+  else if (Cloud.autoRenew()) return;
+  else if (Cloud.st.on){ Cloud.msg = '登录已过期，点"立即同步"重新登录'; }
+  if (!S.keys.groq) setTimeout(() => toast(Cloud.st.on ? '云端还没有设置。点右上角"设置"填 Groq key' : '第一次用：点右上角"设置"填 Groq key；多台设备可以开云同步', 5000), 600);
+})();
 </script>
 </body>
 </html>
