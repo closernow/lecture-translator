@@ -43,6 +43,7 @@ a{color:#7fb7ff}
 .line .zh{font-size:calc(var(--fs) * .9);line-height:1.5;color:var(--text);opacity:var(--zh-op);margin-top:2px}
 .hide-zh .line .zh{display:none}
 .line.asr .en{color:var(--muted);font-style:italic}
+.line .en .im{color:var(--muted)}
 .line.tr .zh{font-style:italic}
 .line.err .zh{color:var(--danger);opacity:.8}
 .clickable .line{cursor:pointer;border-radius:8px;padding:4px 6px;margin-left:-6px}
@@ -152,17 +153,24 @@ a{color:#7fb7ff}
 
     <div class="sec">
       <h3>API Key</h3>
-      <div class="row"><label>Groq（必填）</label><input type="password" class="key" id="kGroq" autocomplete="off"><button class="eye" data-for="kGroq" aria-label="显示 key">👁</button></div>
+      <div class="row"><label>Deepgram</label><input type="password" class="key" id="kDg" autocomplete="off"><button class="eye" data-for="kDg" aria-label="显示 key">👁</button></div>
+      <div class="row"><label>Groq</label><input type="password" class="key" id="kGroq" autocomplete="off"><button class="eye" data-for="kGroq" aria-label="显示 key">👁</button></div>
       <div class="row"><label>Gemini</label><input type="password" class="key" id="kGemini" autocomplete="off"><button class="eye" data-for="kGemini" aria-label="显示 key">👁</button></div>
       <div class="row"><label>硅基流动</label><input type="password" class="key" id="kSf" autocomplete="off"><button class="eye" data-for="kSf" aria-label="显示 key">👁</button></div>
-      <div class="hint">Groq：console.groq.com 注册，不用绑卡。Gemini：aistudio.google.com 里 Get API key。硅基流动：cloud.siliconflow.cn。Groq 用于识别，必须有；翻译至少要有一家可用。</div>
+      <div class="hint">Deepgram：console.deepgram.com 注册，用于实时逐词识别。Groq：console.groq.com 注册，不用绑卡，用于按句识别（Deepgram 连不上时自动用它）和翻译。Gemini：aistudio.google.com 里 Get API key。硅基流动：cloud.siliconflow.cn。识别至少要有 Deepgram 或 Groq；翻译至少要有一家可用。</div>
     </div>
 
     <div class="sec">
       <h3>识别</h3>
+      <div class="row"><label>识别方式</label><select id="asrEngine">
+        <option value="auto">自动：有 Deepgram key 就用实时</option>
+        <option value="dg">实时逐词（Deepgram）</option>
+        <option value="whisper">按句（Groq Whisper）</option>
+      </select></div>
+      <div class="row"><label>Deepgram 模型</label><input type="text" id="dgModel"></div>
       <div class="row"><label>Whisper 模型</label><input type="text" id="asrModel"></div>
       <div class="row"><label>灵敏度</label><input type="range" id="sens" min="1" max="5" step="1"><span id="sensV" class="hint"></span></div>
-      <div class="hint">教室吵、识别出很多杂音就调低；老师声音小、经常漏句就调高。</div>
+      <div class="hint">实时：英文边说边出，一句说完马上翻译。按句：等老师停顿后整句出来，慢一些但免费。灵敏度只对按句有效：教室吵、识别出很多杂音就调低；老师声音小、经常漏句就调高。</div>
     </div>
 
     <div class="sec">
@@ -267,8 +275,8 @@ const PROVIDERS = [
 ];
 
 const DEFAULTS = {
-  keys:{groq:'', gemini:'', sf:''},
-  asrModel:'whisper-large-v3',
+  keys:{dg:'', groq:'', gemini:'', sf:''},
+  asrEngine:'auto', dgModel:'nova-3', asrModel:'whisper-large-v3',
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
   showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3,
@@ -283,7 +291,7 @@ function loadSettings(){
   S.models = Object.assign({}, saved.models || {});
 }
 // 这些跟着账号走，云同步；字号、中文亮度等显示设置每台设备各自保存
-const SYNC_KEYS = ['keys', 'asrModel', 'models', 'enabled', 'glossary', 'sensitivity'];
+const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'models', 'enabled', 'glossary', 'sensitivity'];
 const syncPart = () => JSON.stringify(SYNC_KEYS.map(k => S[k]));
 let lastSyncPart = '';
 function saveSettings(){
@@ -537,8 +545,9 @@ const Q = { asr:[], asrBusy:false, trBusy:false };
 function setStatus(msg){ $('#prov').textContent = msg; }
 function updateProv(){
   if (L.state === 'idle' && !Q.asr.length && !Q.tr.length){ setStatus(''); return; }
+  const live = L.state !== 'idle' && L.engine === 'dg' ? (DG.ws && DG.ws.readyState === 1 ? '实时 · ' : '实时连接中 · ') : '';
   const wait = (Q.asr.length ? `待识别 ${Q.asr.length} ` : '') + (Q.tr.length ? `待翻译 ${Q.tr.length} ` : '');
-  setStatus(wait + (activeProvider ? '翻译：' + activeProvider.name : ''));
+  setStatus(live + wait + (activeProvider ? '翻译：' + activeProvider.name : ''));
 }
 
 // 运行日志：出问题时在设置页最下面看，截图发出来就知道卡在哪
@@ -566,7 +575,9 @@ async function keepAwake(on){
 }
 
 async function start(){
-  if (!S.keys.groq.trim()){ toast('先在设置里填 Groq key'); openPanel('#pSettings'); return; }
+  const engine = S.asrEngine === 'whisper' || (S.asrEngine === 'auto' && !S.keys.dg.trim()) ? 'whisper' : 'dg';
+  if (engine === 'dg' && !S.keys.dg.trim()){ toast('先在设置里填 Deepgram key'); openPanel('#pSettings'); return; }
+  if (engine === 'whisper' && !S.keys.groq.trim()){ toast('先在设置里填 Deepgram key（实时）或 Groq key（按句）'); openPanel('#pSettings'); return; }
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:true, autoGainControl:true, channelCount:1}});
@@ -607,8 +618,10 @@ async function start(){
     } else if (L.save && !mime){ toast('这个浏览器不支持录音，只保存文字'); }
   } else { L.session = null; L.recorder = null; }
 
+  L.engine = engine;
   L.state = 'running';
-  log(`开始，采样率 ${L.rate}`);
+  log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}，采样率 ${L.rate}`);
+  if (engine === 'dg') DG.begin();
   keepAwake(true);
   updateButtons(); updateProv();
 }
@@ -617,7 +630,7 @@ function defaultTitle(d){ const p = n => String(n).padStart(2,'0'); return `${d.
 
 function pause(){
   if (L.state !== 'running') return;
-  flushSeg();
+  if (L.engine === 'dg') DG.pause(); else flushSeg();
   L.state = 'paused';
   try { if (L.recorder && L.recorder.state === 'recording') L.recorder.pause(); } catch(e){}
   $('#level i').style.width = '0';
@@ -633,13 +646,14 @@ function resume(){
 
 async function end(){
   if (L.state === 'idle') return;
-  if (L.state === 'running') flushSeg();
+  if (L.state === 'running' && L.engine !== 'dg') flushSeg();
   L.state = 'idle';
   updateButtons(); keepAwake(false);
   try { L.proc.disconnect(); L.src.disconnect(); L.sink.disconnect(); } catch(e){}
   L.stream.getTracks().forEach(t => t.stop());
   try { await L.ctx.close(); } catch(e){}
   $('#level i').style.width = '0';
+  if (L.engine === 'dg') await DG.stop();
   const sess = L.session;
   if (L.recorder){ try { if (L.recorder.state !== 'inactive') L.recorder.stop(); await L.recStopped; } catch(e){} L.recorder = null; }
   if (sess){
@@ -650,12 +664,131 @@ async function end(){
   updateProv();
 }
 
-/* VAD + segmenting */
+/* ================= 实时识别（Deepgram 流式） ================= */
+// 声音不停地发过去，英文一个词一个词地回来（灰色的是还在变的部分）；
+// 一句说完（老师停顿、或句号）就定稿，送去翻译
+const DG = {
+  ws:null, opened:false, queue:[], offset:null, inPos:0, cur:null, fails:0, retryAt:0, closing:false,
+  begin(){ Object.assign(this, {ws:null, queue:[], cur:null, fails:0, retryAt:0, closing:false, inPos:0}); this.open(); },
+  url(){
+    const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:'en', encoding:'linear16', sample_rate:'16000', channels:'1',
+      interim_results:'true', smart_format:'true', punctuate:'true', endpointing:'300', utterance_end_ms:'1000', vad_events:'true'});
+    if (/^nova-3/.test(p.get('model'))) parseGlossary().slice(0, 80).forEach(g => p.append('keyterm', g.en));   // 术语表帮助识别专业词（nova-3 才支持）
+    return 'wss://api.deepgram.com/v1/listen?' + p;
+  },
+  open(){
+    this.offset = null; this.opened = false;
+    const t0 = Date.now();
+    let ws;
+    try { ws = new WebSocket(this.url(), ['token', S.keys.dg.trim()]); } catch(e){ log('Deepgram 连接出错：' + e.message); this.failed(); return; }
+    this.ws = ws; ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { this.opened = true; log(`Deepgram 已连接 ${((Date.now() - t0) / 1000).toFixed(1)}秒`); this.flush(); updateProv(); };
+    ws.onmessage = ev => this.onMsg(ev.data);
+    ws.onerror = () => {};
+    ws.onclose = ev => {
+      if (this.ws !== ws) return;
+      this.ws = null; this.endLine(); updateProv();
+      log(`Deepgram 断开 ${ev.code}${ev.reason ? ' ' + ev.reason : ''}`);
+      if (this.closing || L.state === 'idle' || L.engine !== 'dg') return;
+      if (this.opened){ this.fails = 0; this.retryAt = 0; }   // 用着用着断了（比如切后台没声音了），有声音时马上重连
+      else this.failed();                                       // 根本连不上
+    };
+  },
+  failed(){
+    this.fails++;
+    this.retryAt = Date.now() + Math.min(2000 * this.fails, 10000);
+    if (this.fails >= 3 && S.keys.groq.trim()){
+      toast('Deepgram 连不上（检查 key 和网络），这节课先改用按句识别', 7000);
+      log('Deepgram 连续失败，改用 Groq Whisper');
+      L.engine = 'whisper'; L.seg = null; L.hist = []; this.queue = []; updateProv();
+    } else if (this.fails === 3) toast('Deepgram 连不上，检查 key 和网络', 7000);
+  },
+  push(f, t){
+    this.queue.push({t, buf:toPcm16(f, L.rate)});
+    if (this.queue.length > 200) this.queue.shift();     // 断线时最多攒 17 秒左右，连上后补发
+    if (this.ws && this.ws.readyState === 1) this.flush();
+    else if (!this.ws && Date.now() >= this.retryAt) this.open();
+  },
+  flush(){
+    const ws = this.ws;
+    while (this.queue.length && ws && ws.readyState === 1){
+      const it = this.queue.shift();
+      if (this.offset === null) this.offset = it.t;   // 这条连接的 0 秒对应课堂的哪一刻
+      ws.send(it.buf);
+    }
+  },
+  onMsg(data){
+    let m; try { m = JSON.parse(data); } catch(e){ return; }
+    if (m.type === 'UtteranceEnd'){ this.endLine(); return; }
+    if (m.type !== 'Results') return;
+    const alt = m.channel && m.channel.alternatives && m.channel.alternatives[0];
+    const tx = ((alt && alt.transcript) || '').trim();
+    if (tx && !this.cur) this.newLine((this.offset || 0) + (m.start || 0));
+    const c = this.cur; if (!c) return;
+    if (m.is_final){ if (tx) c.line.en = (c.line.en ? c.line.en + ' ' : '') + tx; c.line.im = ''; }
+    else c.line.im = tx;
+    renderLine(c.line);
+    const words = c.line.en.split(/\s+/).filter(Boolean).length;
+    if (m.is_final && (m.speech_final || (/[.?!]$/.test(tx) && words >= 8) || words >= 40)) this.endLine();
+  },
+  newLine(t){
+    const line = {id:L.nextId++, t, en:'', im:'', zh:'', status:'live'};
+    L.lines.push(line); this.cur = {line};
+  },
+  endLine(){
+    const c = this.cur; if (!c) return; this.cur = null;
+    const line = c.line, text = (line.en || line.im || '').trim();
+    delete line.im;
+    if (!text){ removeLine({lines:L.lines}, line); return; }
+    line.en = text; line.status = 'tr';
+    renderLine(line); dirty(L.session, L.lines);
+    Q.tr.push({line, session:L.session, lines:L.lines}); runTr(); updateProv();
+  },
+  // 暂停：让 Deepgram 把已经听到的马上定稿
+  pause(){
+    try { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({type:'Finalize'})); } catch(e){}
+    setTimeout(() => this.endLine(), 1500);
+  },
+  async stop(){
+    this.closing = true;
+    const ws = this.ws;
+    if (ws && ws.readyState === 1){
+      try { ws.send(JSON.stringify({type:'CloseStream'})); } catch(e){}
+      // 等最后几个词回来
+      await new Promise(r => { const tm = setTimeout(r, 3000); ws.addEventListener('close', () => { clearTimeout(tm); r(); }); });
+    }
+    try { if (ws) ws.close(); } catch(e){}
+    this.ws = null; this.endLine(); this.queue = [];
+  },
+};
+
+// 降到 16kHz 单声道 16 位；记着跨帧的位置，时间轴不会越走越偏
+function toPcm16(f, rate){
+  const r = rate / 16000, a = DG.inPos, b = a + f.length;
+  const j0 = Math.ceil(a / r), j1 = Math.ceil(b / r);
+  const out = new Int16Array(Math.max(0, j1 - j0));
+  for (let j = j0; j < j1; j++){
+    const s = Math.max(0, Math.floor(j * r) - a), e = Math.min(f.length, Math.max(s + 1, Math.floor((j + 1) * r) - a));
+    let sum = 0; for (let i = s; i < e; i++) sum += f[i];
+    const v = Math.max(-1, Math.min(1, sum / (e - s)));
+    out[j - j0] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  DG.inPos = b;
+  return out.buffer;
+}
+
+/* VAD + segmenting（按句识别用） */
 function onFrame(f){
   if (L.state !== 'running') return;
   const n = f.length, t = L.frames / L.rate; L.frames += n;
   let sum = 0; for (let i = 0; i < n; i++) sum += f[i] * f[i];
   const rms = Math.sqrt(sum / n);
+  if (L.engine === 'dg'){
+    $('#level i').style.width = Math.min(100, rms * 900) + '%';
+    $('#clock').textContent = fmtT(L.frames / L.rate);
+    DG.push(f, t);
+    return;
+  }
   // 门槛取在最近 8 秒的"安静水平"和"大声水平"之间。
   // 老师连续讲课时，安静水平取的是词和句之间的空隙，不会被讲话声越带越高
   const hist = L.hist; hist.push(rms); if (hist.length > Math.round(8 * L.rate / n)) hist.shift();
@@ -944,8 +1077,9 @@ $('#btnCloudOff').onclick = () => { if (confirm('关闭云同步？本机数据�
 /* ================= rendering ================= */
 let stick = true;
 function lineHtml(l){
-  const zh = l.status === 'tr' ? '翻译中…' : l.status === 'asr' ? '' : l.zh;
-  return `<div class="t">${fmtT(l.t)}</div><div class="en">${l.status === 'asr' ? '识别中…' : esc(l.en)}</div><div class="zh">${esc(zh)}</div>`;
+  const zh = l.status === 'tr' ? '翻译中…' : (l.status === 'asr' || l.status === 'live') ? '' : l.zh;
+  const en = l.status === 'asr' ? '识别中…' : l.status === 'live' ? esc(l.en) + ' <span class="im">' + esc(l.im || '') + '</span>' : esc(l.en);
+  return `<div class="t">${fmtT(l.t)}</div><div class="en">${en}</div><div class="zh">${esc(zh)}</div>`;
 }
 function renderLine(l){
   const box = $('#subs');
@@ -1059,8 +1193,8 @@ $('#btnExportAudio').onclick = async () => {
 
 /* settings */
 function fillSettings(){
-  $('#kGroq').value = S.keys.groq; $('#kGemini').value = S.keys.gemini; $('#kSf').value = S.keys.sf;
-  $('#asrModel').value = S.asrModel; $('#sens').value = S.sensitivity; $('#sensV').textContent = S.sensitivity;
+  $('#kDg').value = S.keys.dg; $('#kGroq').value = S.keys.groq; $('#kGemini').value = S.keys.gemini; $('#kSf').value = S.keys.sf;
+  $('#asrEngine').value = S.asrEngine; $('#dgModel').value = S.dgModel; $('#asrModel').value = S.asrModel; $('#sens').value = S.sensitivity; $('#sensV').textContent = S.sensitivity;
   $('#glossary').value = S.glossary;
   $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
   $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
@@ -1084,7 +1218,9 @@ function fillSettings(){
   }
 }
 const bindKey = (sel, k) => $(sel).onchange = () => { S.keys[k] = $(sel).value.trim(); Object.keys(cooldown).forEach(x => cooldown[x] = 0); saveSettings(); };
-bindKey('#kGroq', 'groq'); bindKey('#kGemini', 'gemini'); bindKey('#kSf', 'sf');
+bindKey('#kDg', 'dg'); bindKey('#kGroq', 'groq'); bindKey('#kGemini', 'gemini'); bindKey('#kSf', 'sf');
+$('#asrEngine').onchange = () => { S.asrEngine = $('#asrEngine').value; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
+$('#dgModel').onchange = () => { S.dgModel = $('#dgModel').value.trim() || 'nova-3'; saveSettings(); };
 document.querySelectorAll('.eye').forEach(b => b.onclick = () => {
   const i = document.getElementById(b.dataset.for), show = i.type === 'password';
   i.type = show ? 'text' : 'password';
