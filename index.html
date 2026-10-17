@@ -741,6 +741,7 @@ const Cloud = {
     const p = new URLSearchParams({client_id:GOOGLE_CLIENT_ID, redirect_uri:this.redirectUri(), response_type:'token',
       scope:'https://www.googleapis.com/auth/drive.appdata email', state, include_granted_scopes:'true'});
     if (silent){ p.set('prompt', 'none'); if (this.st.email) p.set('login_hint', this.st.email); }
+    else p.set('prompt', 'consent');   // 每次都显示授权页，上次没勾的 Drive 权限可以补勾
     location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + p;
   },
   // 登录跳回来时，地址栏 # 后面带着 token
@@ -750,7 +751,12 @@ const Cloud = {
     history.replaceState(null, '', location.pathname + location.search);
     const o = lsGet('lt.oauth', {}); localStorage.removeItem('lt.oauth');
     if (!o.state || h.get('state') !== o.state) return;
-    if (h.get('access_token')){
+    if (h.get('access_token') && !(h.get('scope') || '').includes('drive.appdata')){
+      // 授权页上 Drive 那一项没勾
+      Object.assign(this.st, {on:true, token:''}); this.save();
+      this.msg = '授权时没勾选 Google Drive 那一项。点"立即同步"重新登录，在授权页把 Drive 那一项也勾上。';
+      toast(this.msg, 8000);
+    } else if (h.get('access_token')){
       Object.assign(this.st, {on:true, token:h.get('access_token'), exp:Date.now() + (+h.get('expires_in') - 120) * 1000});
       try {
         const r = await fetchT('https://oauth2.googleapis.com/tokeninfo?access_token=' + encodeURIComponent(this.st.token), {});
@@ -774,6 +780,10 @@ const Cloud = {
   async api(method, url, opts = {}){
     const res = await fetchT(url, Object.assign({method}, opts, {headers:Object.assign({Authorization:'Bearer ' + this.st.token}, opts.headers || {})}), 30000);
     if (res.status === 401){ this.st.token = ''; this.save(); }
+    if (res.status === 403 && /insufficient.{0,20}scope/i.test(await res.clone().text())){
+      this.st.token = ''; this.save();
+      const e = new Error('没有 Drive 权限'); e.status = 401; e.scope = true; throw e;
+    }
     if (!res.ok) throw await httpErr(res);
     return res;
   },
@@ -811,7 +821,8 @@ const Cloud = {
       do { this.again = false; await this.syncOnce(); } while (this.again);
       this.st.lastSync = Date.now(); this.msg = ''; this.save();
     } catch(e){
-      this.msg = e.status === 401 ? '登录已过期，点"立即同步"重新登录' : '同步失败：' + netMsg(e);
+      this.msg = e.scope ? '没有 Google Drive 权限。点"立即同步"重新登录，在授权页把 Drive 那一项也勾上。'
+        : e.status === 401 ? '登录已过期，点"立即同步"重新登录' : '同步失败：' + netMsg(e);
       console.warn('cloud', e);
     } finally { this.busy = false; renderCloud(); }
   },
@@ -1099,8 +1110,8 @@ DB.allSessions().then(list => { // 本机上次意外中断的标记一下（别
 (async () => {
   await Cloud.handleRedirect();
   if (Cloud.ready()){ localStorage.removeItem('lt.silentAt'); Cloud.sync(); }
-  else if (Cloud.autoRenew()) return;
-  else if (Cloud.st.on){ Cloud.msg = '登录已过期，点"立即同步"重新登录'; }
+  else if (!Cloud.msg && Cloud.autoRenew()) return;
+  else if (Cloud.st.on && !Cloud.msg){ Cloud.msg = '登录已过期，点"立即同步"重新登录'; }
   if (!S.keys.groq) setTimeout(() => toast(Cloud.st.on ? '云端还没有设置。点右上角"设置"填 Groq key' : '第一次用：点右上角"设置"填 Groq key；多台设备可以开云同步', 5000), 600);
 })();
 </script>
