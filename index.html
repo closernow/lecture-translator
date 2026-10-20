@@ -657,6 +657,7 @@ async function buildCapture(i){
   src.connect(proc); proc.connect(sink); sink.connect(ctx.destination);
   // iPad 有时会把音频挂起（来电、别的 App 占用麦克风），记下来并尽量自动恢复
   ctx.onstatechange = () => {
+    if (ctx.state === 'closed') return;   // 结束时正常关闭，不用记
     log('音频状态：' + ctx.state);
     if (ctx.state !== 'running' && ctx.state !== 'closed' && L.state === 'running' && L.ctx === ctx) ctx.resume().catch(() => {});
   };
@@ -697,6 +698,10 @@ function capTick(){
     const ratio = L.capFrames / L.rate / since;
     L.capRatios[L.capMode] = ratio;
     log(`采音检查：${CAP_MODES[L.capMode].name}，收到 ${Math.round(ratio * 100)}% 的声音`);
+    try {
+      if (ratio >= 0.97) localStorage.setItem('lt.capMode', L.capMode);   // 记住，下次直接用
+      else if (ratio < 0.93 && +localStorage.getItem('lt.capMode') === L.capMode) localStorage.removeItem('lt.capMode');
+    } catch(e){}
     if (ratio < 0.93 && !L.capFinal) switchCapture();
   }
   const win = (now - L.diagT0) / 1000;
@@ -721,8 +726,12 @@ async function start(){
 
   Object.assign(L, {stream, ctx:null, micRate:ts.sampleRate || 0, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false,
     wall0:0, pausedMs:0, pausedAt:0, capRatios:{}, capFinal:false});
+  // 先用这台设备上次验证过收得全的方式（iPad 上音频线程只收到 75%，旧方式 100%）
+  const pref = +localStorage.getItem('lt.capMode');
+  const order = CAP_MODES.map((_, i) => i);
+  if (pref > 0 && pref < CAP_MODES.length){ order.splice(order.indexOf(pref), 1); order.unshift(pref); }
   let ok = false;
-  for (let i = 0; i < CAP_MODES.length && !ok; i++){ ok = await buildCapture(i); if (!ok) L.capRatios[i] = -1; }
+  for (const i of order){ if (ok) break; ok = await buildCapture(i); if (!ok) L.capRatios[i] = -1; }
   if (!ok){ toast('音频处理启动失败，换个浏览器试试'); stream.getTracks().forEach(t => t.stop()); return; }
   L.wall0 = performance.now();
   capWindowReset();
