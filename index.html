@@ -601,8 +601,8 @@ async function keepAwake(on){
 }
 
 // 采音：把麦克风的声音一块一块（4096 个采样）交给页面，再送去识别。
-// iPad 上有的方式会悄悄丢声音（实测只收到 76%），所以准备了几种方式：
-// 开始后检查收到的声音够不够，不够就自动换下一种，日志里记下结果
+// 默认用 ScriptProcessor（旧方式，各浏览器都支持；iPad 实测 100%，而音频线程只收到 75%）。
+// 开始 15 秒后检查收到的声音够不够，不够才换下一种，日志里记下结果
 const CAPTURE_WORKLET = `class Cap extends AudioWorkletProcessor {
   constructor(){ super(); this.buf = new Float32Array(4096); this.n = 0; }
   process(inputs){
@@ -617,10 +617,10 @@ const CAPTURE_WORKLET = `class Cap extends AudioWorkletProcessor {
 registerProcessor('cap', Cap);`;
 let workletUrl = null;
 const CAP_MODES = [
-  {kind:'worklet', rate:'mic',  name:'音频线程，按麦克风采样率'},
   {kind:'script',  rate:'mic',  name:'旧方式，按麦克风采样率'},
-  {kind:'worklet', rate:'auto', name:'音频线程，系统默认采样率'},
+  {kind:'worklet', rate:'mic',  name:'音频线程，按麦克风采样率'},
   {kind:'script',  rate:'auto', name:'旧方式，系统默认采样率'},
+  {kind:'worklet', rate:'auto', name:'音频线程，系统默认采样率'},
 ];
 // 课堂时间：从开始算的真实秒数（去掉暂停的时间）。字幕时间点、录音位置、顶栏计时都用它，
 // 就算送去识别的声音丢了一些，也和录音对得上
@@ -698,10 +698,6 @@ function capTick(){
     const ratio = L.capFrames / L.rate / since;
     L.capRatios[L.capMode] = ratio;
     log(`采音检查：${CAP_MODES[L.capMode].name}，收到 ${Math.round(ratio * 100)}% 的声音`);
-    try {
-      if (ratio >= 0.97) localStorage.setItem('lt.capMode', L.capMode);   // 记住，下次直接用
-      else if (ratio < 0.93 && +localStorage.getItem('lt.capMode') === L.capMode) localStorage.removeItem('lt.capMode');
-    } catch(e){}
     if (ratio < 0.93 && !L.capFinal) switchCapture();
   }
   const win = (now - L.diagT0) / 1000;
@@ -726,12 +722,8 @@ async function start(){
 
   Object.assign(L, {stream, ctx:null, micRate:ts.sampleRate || 0, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false,
     wall0:0, pausedMs:0, pausedAt:0, capRatios:{}, capFinal:false});
-  // 先用这台设备上次验证过收得全的方式（iPad 上音频线程只收到 75%，旧方式 100%）
-  const pref = +localStorage.getItem('lt.capMode');
-  const order = CAP_MODES.map((_, i) => i);
-  if (pref > 0 && pref < CAP_MODES.length){ order.splice(order.indexOf(pref), 1); order.unshift(pref); }
   let ok = false;
-  for (const i of order){ if (ok) break; ok = await buildCapture(i); if (!ok) L.capRatios[i] = -1; }
+  for (let i = 0; i < CAP_MODES.length && !ok; i++){ ok = await buildCapture(i); if (!ok) L.capRatios[i] = -1; }
   if (!ok){ toast('音频处理启动失败，换个浏览器试试'); stream.getTracks().forEach(t => t.stop()); return; }
   L.wall0 = performance.now();
   capWindowReset();
