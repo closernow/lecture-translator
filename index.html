@@ -44,6 +44,8 @@ a{color:#7fb7ff}
 .hide-zh .line .zh{display:none}
 .line.asr .en{color:var(--muted);font-style:italic}
 .line .en .im{color:var(--muted)}
+.caret{display:inline-block;width:2px;height:1em;margin-left:3px;vertical-align:-0.12em;background:var(--accent);animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
 .line.tr .zh{font-style:italic}
 .line.err .zh{color:var(--danger);opacity:.8}
 .clickable .line{cursor:pointer;border-radius:8px;padding:4px 6px;margin-left:-6px}
@@ -275,9 +277,9 @@ G2 = G2
 G3 = G3`;
 
 const PROVIDERS = [
-  {id:'groq-qwen',   name:'Qwen3-32B · Groq',     kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'qwen/qwen3-32b', extra:{reasoning_effort:'none'}, suffix:' /no_think'},
-  {id:'gemini-lite', name:'Gemini Flash-Lite',    kind:'gemini', keyName:'gemini', model:'gemini-2.5-flash-lite'},
   {id:'groq-gptoss', name:'gpt-oss-120b · Groq',  kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'openai/gpt-oss-120b', extra:{reasoning_effort:'low'}},
+  // -latest 是 Google 自动指向最新 Flash-Lite 的名字，旧版本下架也不用改
+  {id:'gemini-lite', name:'Gemini Flash-Lite',    kind:'gemini', keyName:'gemini', model:'gemini-flash-lite-latest'},
   {id:'sf-qwen8b',   name:'Qwen3-8B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'Qwen/Qwen3-8B', extra:{enable_thinking:false}},
   {id:'sf-glm',      name:'GLM-4-9B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'THUDM/GLM-4-9B-0414'},
   {id:'groq-llama70',name:'Llama 3.3 70B · Groq', kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'llama-3.3-70b-versatile'},
@@ -532,7 +534,8 @@ async function translateWithFallback(sys, user){
     } catch(e){
       log(`翻译失败 ${p.name} ${((Date.now() - t0) / 1000).toFixed(1)}秒：${netMsg(e).slice(0, 160)}`);
       lastErr = e;
-      let wait = e.retryAfter || (e.status === 429 ? 60e3 : (e.status === 401 || e.status === 403) ? 3600e3 : (e.status === 400 || e.status === 404) ? 600e3 : 20e3);
+      // 404 一般是模型下架了，6 小时内别再试；400 多半是参数问题，10 分钟
+      let wait = e.retryAfter || (e.status === 429 ? 60e3 : (e.status === 401 || e.status === 403) ? 3600e3 : e.status === 404 ? 6 * 3600e3 : e.status === 400 ? 600e3 : 20e3);
       if (/per.?day|daily|RPD|TPD/i.test(e.body || '')) wait = Math.max(wait, 15 * 60e3);
       cooldown[p.id] = Date.now() + wait;
       console.warn(p.name, e);
@@ -597,8 +600,9 @@ async function keepAwake(on){
   if (on && !('wakeLock' in navigator) && !wakeHinted){ wakeHinted = true; toast('这个系统版本网页不能自动保持亮屏：请把 设置→显示与亮度→自动锁定 改成"永不"', 7000); }
 }
 
-// 采音：放在独立的音频线程（AudioWorklet）里攒满 4096 个采样再交给页面。
-// 原来的 ScriptProcessor 跑在页面主线程，页面一忙（同步、上传、刷新字幕）就直接丢声音
+// 采音：把麦克风的声音一块一块（4096 个采样）交给页面，再送去识别。
+// iPad 上有的方式会悄悄丢声音（实测只收到 76%），所以准备了几种方式：
+// 开始后检查收到的声音够不够，不够就自动换下一种，日志里记下结果
 const CAPTURE_WORKLET = `class Cap extends AudioWorkletProcessor {
   constructor(){ super(); this.buf = new Float32Array(4096); this.n = 0; }
   process(inputs){
@@ -611,19 +615,95 @@ const CAPTURE_WORKLET = `class Cap extends AudioWorkletProcessor {
   }
 }
 registerProcessor('cap', Cap);`;
-async function makeCapture(ctx){
+let workletUrl = null;
+const CAP_MODES = [
+  {kind:'worklet', rate:'mic',  name:'音频线程，按麦克风采样率'},
+  {kind:'script',  rate:'mic',  name:'旧方式，按麦克风采样率'},
+  {kind:'worklet', rate:'auto', name:'音频线程，系统默认采样率'},
+  {kind:'script',  rate:'auto', name:'旧方式，系统默认采样率'},
+];
+// 课堂时间：从开始算的真实秒数（去掉暂停的时间）。字幕时间点、录音位置、顶栏计时都用它，
+// 就算送去识别的声音丢了一些，也和录音对得上
+function realNow(){
+  if (!L.wall0) return 0;
+  const now = L.state === 'paused' ? L.pausedAt : performance.now();
+  return Math.max(0, (now - L.wall0 - L.pausedMs) / 1000);
+}
+// 重新开始统计"收到了多少声音"（暂停、切后台回来、换采集方式之后）
+function capWindowReset(){ Object.assign(L, {capT0:performance.now(), capFrames:0, capChecked:false, diagT0:performance.now(), diagFrames:0}); }
+
+async function buildCapture(i){
+  const m = CAP_MODES[i], AC = window.AudioContext || window.webkitAudioContext;
+  let ctx;
+  try { ctx = m.rate === 'mic' && L.micRate ? new AC({sampleRate:L.micRate}) : new AC(); }
+  catch(e){ log(`采音：${m.name} 建不起来（${e.message}）`); return false; }
+  if (ctx.state !== 'running'){ try { await ctx.resume(); } catch(e){} }
+  if (ctx.state !== 'running'){ log(`采音：${m.name} 启动不了（${ctx.state}）`); ctx.close().catch(() => {}); return false; }
+  let proc;
   try {
-    if (!ctx.audioWorklet || !window.AudioWorkletNode) throw new Error('不支持');
-    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([CAPTURE_WORKLET], {type:'application/javascript'})));
-    const node = new AudioWorkletNode(ctx, 'cap', {numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[1]});
-    node.port.onmessage = e => onFrame(e.data);
-    log('采音：音频线程');
-    return node;
-  } catch(e){
-    log('采音：音频线程不可用（' + e.message + '），用旧方式');
-    const p = ctx.createScriptProcessor(4096, 1, 1);
-    p.onaudioprocess = ev => onFrame(ev.inputBuffer.getChannelData(0));
-    return p;
+    if (m.kind === 'worklet'){
+      if (!ctx.audioWorklet || !window.AudioWorkletNode) throw new Error('浏览器不支持');
+      if (!workletUrl) workletUrl = URL.createObjectURL(new Blob([CAPTURE_WORKLET], {type:'application/javascript'}));
+      await ctx.audioWorklet.addModule(workletUrl);
+      proc = new AudioWorkletNode(ctx, 'cap', {numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[1]});
+      proc.port.onmessage = e => onFrame(e.data);
+    } else {
+      proc = ctx.createScriptProcessor(4096, 1, 1);
+      proc.onaudioprocess = ev => onFrame(ev.inputBuffer.getChannelData(0));
+    }
+  } catch(e){ log(`采音：${m.name} 不可用（${e.message}）`); ctx.close().catch(() => {}); return false; }
+  const src = ctx.createMediaStreamSource(L.stream), sink = ctx.createGain();
+  sink.gain.value = 0;
+  src.connect(proc); proc.connect(sink); sink.connect(ctx.destination);
+  // iPad 有时会把音频挂起（来电、别的 App 占用麦克风），记下来并尽量自动恢复
+  ctx.onstatechange = () => {
+    log('音频状态：' + ctx.state);
+    if (ctx.state !== 'running' && ctx.state !== 'closed' && L.state === 'running' && L.ctx === ctx) ctx.resume().catch(() => {});
+  };
+  // 新的好了再拆旧的
+  if (L.ctx){
+    if (L.engine === 'whisper' && L.seg) flushSeg();   // 旧采样率攒的那段先送走
+    try { if (L.proc.port) L.proc.port.onmessage = null; L.proc.onaudioprocess = null; L.src.disconnect(); L.proc.disconnect(); L.sink.disconnect(); } catch(e){}
+    L.ctx.onstatechange = null; L.ctx.close().catch(() => {});
+  }
+  Object.assign(L, {ctx, src, proc, sink, rate:ctx.sampleRate, capMode:i, hist:[], seg:null});
+  DG.inPos = 0;
+  capWindowReset();
+  log(`采音：${m.name}，处理采样率 ${ctx.sampleRate}Hz` + (ctx.baseLatency ? `，延迟 ${Math.round(ctx.baseLatency * 1000)}ms` : ''));
+  return true;
+}
+// 收到的声音不够，换下一种还没试过的；都试过了就用收得最全的那种
+async function switchCapture(){
+  const tried = L.capRatios;
+  for (let i = 0; i < CAP_MODES.length; i++){
+    if (i in tried) continue;
+    if (await buildCapture(i)) return;
+    tried[i] = -1;
+  }
+  let best = L.capMode;
+  for (const i in tried) if (tried[i] > (tried[best] ?? -1)) best = +i;
+  if (best !== L.capMode && await buildCapture(best)){ L.capFinal = true; log(`采音：几种方式都试过了，用收得最全的：${CAP_MODES[best].name}（${Math.round(tried[best] * 100)}%）`); return; }
+  L.capFinal = true;
+  log(`采音：几种方式都试过了，最好的是当前这种（${Math.round((tried[L.capMode] || 0) * 100)}%）`);
+}
+// 每秒：更新计时；开始 15 秒后检查收到的声音够不够；之后每 30 秒，声音不全就记一笔
+function capTick(){
+  if (L.state !== 'running' || document.visibilityState === 'hidden') return;
+  $('#clock').textContent = fmtT(realNow());
+  const now = performance.now();
+  const since = (now - L.capT0) / 1000;
+  if (!L.capChecked && since >= 15){
+    L.capChecked = true;
+    const ratio = L.capFrames / L.rate / since;
+    L.capRatios[L.capMode] = ratio;
+    log(`采音检查：${CAP_MODES[L.capMode].name}，收到 ${Math.round(ratio * 100)}% 的声音`);
+    if (ratio < 0.93 && !L.capFinal) switchCapture();
+  }
+  const win = (now - L.diagT0) / 1000;
+  if (win >= 30){
+    const ratio = L.diagFrames / L.rate / win;
+    if (ratio < 0.97) log(`最近 ${Math.round(win)} 秒只收到 ${Math.round(ratio * 100)}% 的声音`);
+    L.diagT0 = now; L.diagFrames = 0;
   }
 }
 
@@ -635,21 +715,17 @@ async function start(){
   try {
     stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:true, autoGainControl:true, channelCount:1}});
   } catch(e){ toast('拿不到麦克风权限：' + e.message); return; }
+  const track = stream.getAudioTracks()[0];
+  const ts = (track && track.getSettings && track.getSettings()) || {};
+  log(`麦克风：${track ? track.label || '默认' : '?'}，采样率 ${ts.sampleRate || '未知'}，${ts.channelCount || '?'} 声道`);
 
-  const AC = window.AudioContext || window.webkitAudioContext;
-  const ctx = new AC();
-  if (ctx.state !== 'running') { try { await ctx.resume(); } catch(e){} }
-  // iPad 有时会把音频挂起（来电、别的 App 占用麦克风），记下来并尽量自动恢复
-  ctx.onstatechange = () => {
-    log('音频状态：' + ctx.state);
-    if (ctx.state !== 'running' && ctx.state !== 'closed' && L.state === 'running') ctx.resume().catch(() => {});
-  };
-  Object.assign(L, {stream, ctx, rate:ctx.sampleRate, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false,
-    wall0:performance.now(), pausedMs:0, pausedAt:0, lostLogged:0});
-  L.src = ctx.createMediaStreamSource(stream);
-  L.sink = ctx.createGain(); L.sink.gain.value = 0;
-  L.proc = await makeCapture(ctx);
-  L.src.connect(L.proc); L.proc.connect(L.sink); L.sink.connect(ctx.destination);
+  Object.assign(L, {stream, ctx:null, micRate:ts.sampleRate || 0, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false,
+    wall0:0, pausedMs:0, pausedAt:0, capRatios:{}, capFinal:false});
+  let ok = false;
+  for (let i = 0; i < CAP_MODES.length && !ok; i++){ ok = await buildCapture(i); if (!ok) L.capRatios[i] = -1; }
+  if (!ok){ toast('音频处理启动失败，换个浏览器试试'); stream.getTracks().forEach(t => t.stop()); return; }
+  L.wall0 = performance.now();
+  capWindowReset();
 
   $('#subs').innerHTML = ''; stick = true;
 
@@ -664,9 +740,10 @@ async function start(){
 
   L.engine = engine;
   L.state = 'running';
-  log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}，采样率 ${L.rate}`);
+  log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}`);
   if (engine === 'dg') DG.begin();
   if (L.mime){ recStart(); clearInterval(L.recTimer); L.recTimer = setInterval(recRotate, 1000); }
+  clearInterval(L.capTimer); L.capTimer = setInterval(capTick, 1000);
   keepAwake(true);
   updateButtons(); updateProv();
 }
@@ -686,6 +763,7 @@ function resume(){
   if (L.ctx.state !== 'running') L.ctx.resume();
   L.pausedMs += performance.now() - L.pausedAt;
   L.state = 'running';
+  capWindowReset();
   if (L.mime) recStart();
   updateButtons();
 }
@@ -698,7 +776,7 @@ function recStart(){
   let rec;
   try { rec = new MediaRecorder(L.stream, {mimeType:L.mime, audioBitsPerSecond:48000}); }
   catch(e){ toast('录音功能启动失败，只保存文字：' + e.message); log('录音启动失败：' + e.message); L.mime = ''; return; }
-  const seg = {rec, idx:L.segIdx++, t0:L.frames / L.rate, t1:null, parts:[], mime:L.mime.split(';')[0], sess:L.session};
+  const seg = {rec, idx:L.segIdx++, t0:realNow(), t1:null, parts:[], mime:L.mime.split(';')[0], sess:L.session};
   rec.ondataavailable = e => { if (e.data && e.data.size) seg.parts.push(e.data); };
   rec.onerror = e => log('录音出错：' + ((e.error && e.error.message) || e.name || ''));
   seg.done = new Promise(r => { rec.onstop = r; }).then(() => recSave(seg));
@@ -708,14 +786,14 @@ function recStart(){
 function recStop(){
   const seg = L.rec; L.rec = null;
   if (!seg) return Promise.resolve();
-  seg.t1 = L.frames / L.rate;
+  seg.t1 = realNow();
   try { if (seg.rec.state !== 'inactive') seg.rec.stop(); else return recSave(seg); } catch(e){ return recSave(seg); }
   return seg.done;
 }
 // 满 3 分钟：先开新的一段再停旧的，中间不漏
 function recRotate(){
-  if (L.state !== 'running' || !L.rec || L.frames / L.rate - L.rec.t0 < REC_SEG) return;
-  const old = L.rec; old.t1 = L.frames / L.rate;
+  if (L.state !== 'running' || !L.rec || realNow() - L.rec.t0 < REC_SEG) return;
+  const old = L.rec; old.t1 = realNow();
   recStart();
   try { old.rec.stop(); } catch(e){}
 }
@@ -723,7 +801,7 @@ async function recSave(seg){
   if (seg.saved) return; seg.saved = true;
   if (!seg.parts.length){ log(`录音第${seg.idx + 1}段是空的`); return; }
   const blob = new Blob(seg.parts, {type:seg.mime});
-  const meta = {idx:seg.idx, t0:seg.t0, dur:Math.max(0, (seg.t1 == null ? L.frames / L.rate : seg.t1) - seg.t0), mime:seg.mime};
+  const meta = {idx:seg.idx, t0:seg.t0, dur:Math.max(0, (seg.t1 == null ? realNow() : seg.t1) - seg.t0), mime:seg.mime};
   try { await DB.putSeg(Object.assign({sessionId:seg.sess.id, blob, own:true}, meta)); }
   catch(e){ toast('录音保存失败：' + e.message); log('录音保存失败：' + e.message); return; }
   seg.sess.segs = (seg.sess.segs || []).filter(s => s.idx !== meta.idx).concat(meta).sort((a, b) => a.idx - b.idx);
@@ -734,9 +812,9 @@ async function recSave(seg){
 async function end(){
   if (L.state === 'idle') return;
   if (L.state === 'running' && L.engine !== 'dg') flushSeg();
-  const sess = L.session;
+  const sess = L.session, endT = realNow();
   // 先把录音收尾存好，再关麦克风（反过来 iPad 上录音文件会坏）
-  clearInterval(L.recTimer);
+  clearInterval(L.recTimer); clearInterval(L.capTimer);
   await recStop();
   L.state = 'idle';
   updateButtons(); keepAwake(false);
@@ -746,7 +824,7 @@ async function end(){
   $('#level i').style.width = '0';
   if (L.engine === 'dg') await DG.stop();
   if (sess){
-    sess.duration = L.frames / L.rate; sess.status = 'done';
+    sess.duration = endT; sess.status = 'done';
     await persistNow(sess);
     toast('已保存到历史记录。还在翻译的句子完成后会自动补存。');
   }
@@ -760,7 +838,7 @@ const DG = {
   ws:null, opened:false, queue:[], sent:[], offset:null, inPos:0, cur:null, fails:0, retryAt:0, closing:false,
   confirmed:0, lastMsgAt:0, lastSendAt:0, openAt:0, dog:null,
   begin(){
-    Object.assign(this, {ws:null, queue:[], sent:[], cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0});
+    Object.assign(this, {ws:null, queue:[], sent:[], map:[], audioPos:0, cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0});
     clearInterval(this.dog); this.dog = setInterval(() => this.watch(), 2000);
     this.open();
   },
@@ -770,8 +848,17 @@ const DG = {
     if (/^nova-3/.test(p.get('model'))) parseGlossary().slice(0, 80).forEach(g => p.append('keyterm', g.en));   // 术语表帮助识别专业词（nova-3 才支持）
     return 'wss://api.deepgram.com/v1/listen?' + p;
   },
+  // Deepgram 说的时间是"这条连接收到的第几秒声音"，换成课堂时间：
+  // 每块声音发出去时记下它在连接里的位置和课堂时间，查表换算（声音中间丢过也对得上）
+  realT(x){
+    const m = this.map; if (!m.length) return x;
+    let lo = 0, hi = m.length - 1;
+    if (x < m[0].a) return m[0].t - (m[0].a - x);
+    while (lo < hi){ const mid = (lo + hi + 1) >> 1; if (m[mid].a <= x) lo = mid; else hi = mid - 1; }
+    return m[lo].t + (x - m[lo].a);
+  },
   open(){
-    this.offset = null; this.opened = false; this.openAt = this.lastMsgAt = Date.now();
+    this.offset = null; this.audioPos = 0; this.map = []; this.opened = false; this.openAt = this.lastMsgAt = Date.now();
     let ws;
     try { ws = new WebSocket(this.url(), ['token', S.keys.dg.trim()]); } catch(e){ log('Deepgram 连接出错：' + e.message); this.failed(); return; }
     this.ws = ws; ws.binaryType = 'arraybuffer';
@@ -828,20 +915,21 @@ const DG = {
       const it = this.queue.shift();
       if (this.offset === null) this.offset = it.t;   // 这条连接的 0 秒对应课堂的哪一刻
       ws.send(it.buf);
+      this.map.push({a:this.audioPos, t:it.t}); this.audioPos += it.d;
       this.sent.push(it); this.lastSendAt = Date.now();
     }
     while (this.sent.length && this.sent[0].t < this.sent[this.sent.length - 1].t - 40) this.sent.shift();   // 只留最近 40 秒备重发
+    if (this.map.length > 3000) this.map.splice(0, this.map.length - 2000);   // 换算表留最近 3 分钟左右
   },
   onMsg(data){
     let m; try { m = JSON.parse(data); } catch(e){ return; }
     if (m.type === 'UtteranceEnd'){ if (this.cur && !this.cur.im.length) this.endLine(); return; }   // 停顿了，而且后面没有新词
     if (m.type !== 'Results') return;
-    const base = this.offset || 0;
     const alt = m.channel && m.channel.alternatives && m.channel.alternatives[0];
     const tx = ((alt && alt.transcript) || '').trim();
-    let words = ((alt && alt.words) || []).map(w => ({w:w.punctuated_word || w.word, s:base + w.start}));
-    if (tx && !words.length) words = [{w:tx, s:base + (m.start || 0)}];
-    if (m.is_final){ const fe = base + (m.start || 0) + (m.duration || 0); if (fe > this.confirmed) this.confirmed = fe; }
+    let words = ((alt && alt.words) || []).map(w => ({w:w.punctuated_word || w.word, s:this.realT(w.start)}));
+    if (tx && !words.length) words = [{w:tx, s:this.realT(m.start || 0)}];
+    if (m.is_final){ const fe = this.realT((m.start || 0) + (m.duration || 0)); if (fe > this.confirmed) this.confirmed = fe; }
     if (tx && !this.cur) this.newLine(words[0].s);
     const c = this.cur; if (!c) return;
     if (m.is_final){
@@ -913,20 +1001,12 @@ function toPcm16(f, rate){
 /* VAD + segmenting（按句识别用） */
 function onFrame(f){
   if (L.state !== 'running') return;
-  const n = f.length, t = L.frames / L.rate; L.frames += n;
-  // 收到的声音比实际过去的时间少，说明中间丢了（页面切到后台、设备太忙）
-  if ((L.frames / n) % 128 === 0){
-    const lost = (performance.now() - L.wall0 - L.pausedMs) / 1000 - L.frames / L.rate;
-    if (lost - L.lostLogged > 1){ log(`声音少了约 ${lost.toFixed(1)} 秒（页面切到后台或设备太忙）`); L.lostLogged = lost; }
-  }
+  const n = f.length, t = Math.max(0, realNow() - n / L.rate);   // 这一块声音开始的课堂时间
+  L.frames += n; L.capFrames += n; L.diagFrames += n;
   let sum = 0; for (let i = 0; i < n; i++) sum += f[i] * f[i];
   const rms = Math.sqrt(sum / n);
-  if (L.engine === 'dg'){
-    $('#level i').style.width = Math.min(100, rms * 900) + '%';
-    $('#clock').textContent = fmtT(L.frames / L.rate);
-    DG.push(f, t);
-    return;
-  }
+  $('#level i').style.width = Math.min(100, rms * 900) + '%';
+  if (L.engine === 'dg'){ DG.push(f, t); return; }
   // 门槛取在最近 8 秒的"安静水平"和"大声水平"之间。
   // 老师连续讲课时，安静水平取的是词和句之间的空隙，不会被讲话声越带越高
   const hist = L.hist; hist.push(rms); if (hist.length > Math.round(8 * L.rate / n)) hist.shift();
@@ -935,8 +1015,6 @@ function onFrame(f){
   const alpha = [0.5, 0.4, 0.3, 0.22, 0.15][(S.sensitivity|0) - 1] || 0.3;
   const thr = Math.max(0.006, floor * 1.6, floor + (loud - floor) * alpha);
   const speech = rms > thr;
-  $('#level i').style.width = Math.min(100, rms * 900) + '%';
-  $('#clock').textContent = fmtT(L.frames / L.rate);
 
   if (!L.seg) L.seg = {chunks:[], len:0, startT:t, speech:0, silence:0};
   const s = L.seg, dur = n / L.rate;
@@ -1023,7 +1101,7 @@ function dirty(sess, lines){
   dirtyTimers.set(sess.id, setTimeout(() => { dirtyTimers.delete(sess.id); persistNow(sess); }, 3000));
 }
 async function persistNow(sess){
-  if (L.session === sess && L.state !== 'idle') sess.duration = L.frames / L.rate;
+  if (L.session === sess && L.state !== 'idle') sess.duration = realNow();
   try { await DB.putSession(sess); } catch(e){ toast('保存失败：' + e.message); }
 }
 
@@ -1257,12 +1335,21 @@ $('#btnCloudOff').onclick = () => { if (confirm('关闭云同步？本机数据�
 
 /* ================= rendering ================= */
 let stick = true;
+const splitW = s => (s || '').split(/\s+/).filter(Boolean);
+// l.shown：已经"打"出来几个词（没有这个字段就是全部显示）
+function enHtml(l){
+  if (l.status === 'asr') return '识别中…';
+  const fin = splitW(l.en), im = l.status === 'live' ? splitW(l.im) : [];
+  const total = fin.length + im.length, k = l.shown == null ? total : Math.min(l.shown, total);
+  const a = fin.slice(0, k), b = im.slice(0, Math.max(0, k - fin.length));
+  return esc(a.join(' ')) + (b.length ? (a.length ? ' ' : '') + '<span class="im">' + esc(b.join(' ')) + '</span>' : '')
+    + (l.status === 'live' || k < total ? '<span class="caret"></span>' : '');
+}
 function lineHtml(l){
   const zh = l.status === 'tr' ? '翻译中…' : (l.status === 'asr' || l.status === 'live') ? '' : l.zh;
-  const en = l.status === 'asr' ? '识别中…' : l.status === 'live' ? esc(l.en) + ' <span class="im">' + esc(l.im || '') + '</span>' : esc(l.en);
-  return `<div class="t">${fmtT(l.t)}</div><div class="en">${en}</div><div class="zh">${esc(zh)}</div>`;
+  return `<div class="t">${fmtT(l.t)}</div><div class="en">${enHtml(l)}</div><div class="zh">${esc(zh)}</div>`;
 }
-function renderLine(l){
+function paintLine(l){
   const box = $('#subs');
   if (!L.lines.includes(l)) return;
   const empty = box.querySelector('.empty'); if (empty) empty.remove();
@@ -1271,6 +1358,31 @@ function renderLine(l){
   el.className = 'line ' + l.status;
   el.innerHTML = lineHtml(l);
   if (stick) box.scrollTop = box.scrollHeight;
+}
+// 打字效果：识别结果一次来好几个词，不一下子全显示，而是一个词一个词打出来。
+// 速度看还剩几个没打：剩得多就打得快，保证下一批到之前打完，不会越拖越慢。
+// 识别改了前面的词，改动直接换上，只有新增的词才"打"
+const TYPE = {lines:new Set(), timer:null};
+function renderLine(l){
+  if (!L.lines.includes(l)) return;
+  const total = splitW(l.en).length + (l.status === 'live' ? splitW(l.im).length : 0);
+  if (l.status !== 'asr'){
+    if (l.shown == null && !l.typed) l.shown = 0;   // 新的一行，从头打
+    if (l.shown != null){
+      if (l.shown > total) l.shown = total;
+      if (l.shown < total || l.status === 'live'){ TYPE.lines.add(l); if (!TYPE.timer) TYPE.timer = setInterval(typeTick, 60); }
+    }
+  }
+  paintLine(l);
+}
+function typeTick(){
+  for (const l of TYPE.lines){
+    if (!L.lines.includes(l)){ TYPE.lines.delete(l); continue; }
+    const total = splitW(l.en).length + (l.status === 'live' ? splitW(l.im).length : 0);
+    if (l.shown < total){ l.shown += Math.max(1, Math.ceil((total - l.shown) / 5)); paintLine(l); }
+    else if (l.status !== 'live'){ delete l.shown; l.typed = true; TYPE.lines.delete(l); paintLine(l); }
+  }
+  if (!TYPE.lines.size){ clearInterval(TYPE.timer); TYPE.timer = null; }
 }
 // 跟随最新：只有手指/鼠标滚动才算"我在往回看"，程序自己滚动不算；
 // 往回看时停 12 秒没再碰，自动回到最新
@@ -1569,7 +1681,7 @@ $('#togZh').onchange = () => { S.showZh = $('#togZh').checked; applyDisplay(); s
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden'){ if (L.state === 'running'){ L.hidden = true; log('页面切到后台'); } return; }
-  if (L.hidden) log('页面回到前台');
+  if (L.hidden){ log('页面回到前台'); if (L.state === 'running') capWindowReset(); }   // 后台那段不算进"收到多少声音"
   if (L.state === 'idle' && Cloud.st.on && !Cloud.autoRenew()) Cloud.schedule(500);
   if (L.state !== 'idle'){
     keepAwake(true);
