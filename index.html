@@ -354,7 +354,7 @@ const DB = {
     });
   },
   putSession(s, fromCloud){
-    if (!fromCloud){ s.updatedAt = Date.now(); if (!s.device) s.device = DEVICE_ID; Cloud.schedule(L.state === 'idle' ? 3000 : 30000); }
+    if (!fromCloud){ s.updatedAt = Date.now(); if (!s.device) s.device = DEVICE_ID; Cloud.schedule(L.state === 'idle' ? 3000 : 60000); }   // 上课时一分钟同步一次文字就够
     return this.run('sessions', 'readwrite', st => st.put(s));
   },
   getSession(id){ return this.run('sessions', 'readonly', st => st.get(id)); },
@@ -565,20 +565,23 @@ const Q = { asr:[], asrBusy:false, trBusy:false };
 function setStatus(msg){ $('#prov').textContent = msg; }
 function updateProv(){
   if (L.state === 'idle' && !Q.asr.length && !Q.tr.length){ setStatus(''); return; }
-  const live = L.state !== 'idle' && L.engine === 'dg' ? (DG.ws && DG.ws.readyState === 1 ? '实时 · ' : '实时连接中 · ') : '';
+  const live = L.state === 'idle' ? '' : L.engine === 'dg' ? (DG.ws && DG.ws.readyState === 1 ? '实时 · ' : '实时连接中 · ') : '按句 · ';
   const wait = (Q.asr.length ? `待识别 ${Q.asr.length} ` : '') + (Q.tr.length ? `待翻译 ${Q.tr.length} ` : '');
   setStatus(live + wait + (activeProvider ? '翻译：' + activeProvider.name : ''));
 }
 
-// 运行日志：出问题时在设置页最下面看，截图发出来就知道卡在哪
-const LOG = [];
+// 运行日志：出问题时在设置页最下面看，截图发出来就知道卡在哪。
+// 存在本机，刷新页面、下课后再看都还在（最多 500 条）
+const LOG = (() => { try { return JSON.parse(localStorage.getItem('lt.log')) || []; } catch(e){ return []; } })();
+let logTimer = null;
 function log(msg){
   const d = new Date(), p = n => String(n).padStart(2, '0');
-  LOG.push(`${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${msg}`);
-  if (LOG.length > 300) LOG.shift();
+  LOG.push(`${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${msg}`);
+  if (LOG.length > 500) LOG.splice(0, LOG.length - 500);
+  if (!logTimer) logTimer = setTimeout(() => { logTimer = null; try { localStorage.setItem('lt.log', JSON.stringify(LOG)); } catch(e){} }, 3000);
   if ($('#pSettings').classList.contains('show')) renderLog();
 }
-function renderLog(){ $('#logBox').textContent = LOG.slice(-80).reverse().join('\n') || '还没有记录'; }
+function renderLog(){ $('#logBox').textContent = LOG.slice(-150).reverse().join('\n') || '还没有记录'; }
 
 function pickMime(){
   if (!window.MediaRecorder) return '';
@@ -592,6 +595,36 @@ async function keepAwake(on){
     else if (!on && wakeLock){ await wakeLock.release(); wakeLock = null; }
   } catch(e){}
   if (on && !('wakeLock' in navigator) && !wakeHinted){ wakeHinted = true; toast('这个系统版本网页不能自动保持亮屏：请把 设置→显示与亮度→自动锁定 改成"永不"', 7000); }
+}
+
+// 采音：放在独立的音频线程（AudioWorklet）里攒满 4096 个采样再交给页面。
+// 原来的 ScriptProcessor 跑在页面主线程，页面一忙（同步、上传、刷新字幕）就直接丢声音
+const CAPTURE_WORKLET = `class Cap extends AudioWorkletProcessor {
+  constructor(){ super(); this.buf = new Float32Array(4096); this.n = 0; }
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) for (let i = 0; i < ch.length; i++){
+      this.buf[this.n++] = ch[i];
+      if (this.n === 4096){ this.port.postMessage(this.buf, [this.buf.buffer]); this.buf = new Float32Array(4096); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('cap', Cap);`;
+async function makeCapture(ctx){
+  try {
+    if (!ctx.audioWorklet || !window.AudioWorkletNode) throw new Error('不支持');
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([CAPTURE_WORKLET], {type:'application/javascript'})));
+    const node = new AudioWorkletNode(ctx, 'cap', {numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[1]});
+    node.port.onmessage = e => onFrame(e.data);
+    log('采音：音频线程');
+    return node;
+  } catch(e){
+    log('采音：音频线程不可用（' + e.message + '），用旧方式');
+    const p = ctx.createScriptProcessor(4096, 1, 1);
+    p.onaudioprocess = ev => onFrame(ev.inputBuffer.getChannelData(0));
+    return p;
+  }
 }
 
 async function start(){
@@ -611,11 +644,11 @@ async function start(){
     log('音频状态：' + ctx.state);
     if (ctx.state !== 'running' && ctx.state !== 'closed' && L.state === 'running') ctx.resume().catch(() => {});
   };
-  Object.assign(L, {stream, ctx, rate:ctx.sampleRate, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false});
+  Object.assign(L, {stream, ctx, rate:ctx.sampleRate, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false,
+    wall0:performance.now(), pausedMs:0, pausedAt:0, lostLogged:0});
   L.src = ctx.createMediaStreamSource(stream);
-  L.proc = ctx.createScriptProcessor(4096, 1, 1);
   L.sink = ctx.createGain(); L.sink.gain.value = 0;
-  L.proc.onaudioprocess = ev => onFrame(ev.inputBuffer.getChannelData(0));
+  L.proc = await makeCapture(ctx);
   L.src.connect(L.proc); L.proc.connect(L.sink); L.sink.connect(ctx.destination);
 
   $('#subs').innerHTML = ''; stick = true;
@@ -643,7 +676,7 @@ function defaultTitle(d){ const p = n => String(n).padStart(2,'0'); return `${d.
 function pause(){
   if (L.state !== 'running') return;
   if (L.engine === 'dg') DG.pause(); else flushSeg();
-  L.state = 'paused';
+  L.state = 'paused'; L.pausedAt = performance.now();
   recStop();   // 暂停时把这一段录音收尾存好，继续时开新的一段
   $('#level i').style.width = '0';
   updateButtons();
@@ -651,6 +684,7 @@ function pause(){
 function resume(){
   if (L.state !== 'paused') return;
   if (L.ctx.state !== 'running') L.ctx.resume();
+  L.pausedMs += performance.now() - L.pausedAt;
   L.state = 'running';
   if (L.mime) recStart();
   updateButtons();
@@ -723,8 +757,13 @@ async function end(){
 // 声音不停地发过去，英文一个词一个词地回来（灰色的是还在变的部分）；
 // 一句说完（老师停顿、或句号）就定稿，送去翻译
 const DG = {
-  ws:null, opened:false, queue:[], offset:null, inPos:0, cur:null, fails:0, retryAt:0, closing:false,
-  begin(){ Object.assign(this, {ws:null, queue:[], cur:null, fails:0, retryAt:0, closing:false, inPos:0}); this.open(); },
+  ws:null, opened:false, queue:[], sent:[], offset:null, inPos:0, cur:null, fails:0, retryAt:0, closing:false,
+  confirmed:0, lastMsgAt:0, lastSendAt:0, openAt:0, dog:null,
+  begin(){
+    Object.assign(this, {ws:null, queue:[], sent:[], cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0});
+    clearInterval(this.dog); this.dog = setInterval(() => this.watch(), 2000);
+    this.open();
+  },
   url(){
     const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:'en', encoding:'linear16', sample_rate:'16000', channels:'1',
       interim_results:'true', smart_format:'true', punctuate:'true', endpointing:'300', utterance_end_ms:'1000', vad_events:'true'});
@@ -732,22 +771,40 @@ const DG = {
     return 'wss://api.deepgram.com/v1/listen?' + p;
   },
   open(){
-    this.offset = null; this.opened = false;
-    const t0 = Date.now();
+    this.offset = null; this.opened = false; this.openAt = this.lastMsgAt = Date.now();
     let ws;
     try { ws = new WebSocket(this.url(), ['token', S.keys.dg.trim()]); } catch(e){ log('Deepgram 连接出错：' + e.message); this.failed(); return; }
     this.ws = ws; ws.binaryType = 'arraybuffer';
-    ws.onopen = () => { this.opened = true; log(`Deepgram 已连接 ${((Date.now() - t0) / 1000).toFixed(1)}秒`); this.flush(); updateProv(); };
-    ws.onmessage = ev => this.onMsg(ev.data);
+    ws.onopen = () => { this.opened = true; this.lastMsgAt = Date.now(); log(`Deepgram 已连接 ${((Date.now() - this.openAt) / 1000).toFixed(1)}秒`); this.flush(); updateProv(); };
+    ws.onmessage = ev => { this.lastMsgAt = Date.now(); this.onMsg(ev.data); };
     ws.onerror = () => {};
-    ws.onclose = ev => {
-      if (this.ws !== ws) return;
-      this.ws = null; this.endLine(); updateProv();
-      log(`Deepgram 断开 ${ev.code}${ev.reason ? ' ' + ev.reason : ''}`);
-      if (this.closing || L.state === 'idle' || L.engine !== 'dg') return;
-      if (this.opened){ this.fails = 0; this.retryAt = 0; }   // 用着用着断了（比如切后台没声音了），有声音时马上重连
-      else this.failed();                                       // 根本连不上
-    };
+    ws.onclose = ev => { if (this.ws !== ws) return; log(`Deepgram 断开 ${ev.code}${ev.reason ? ' ' + ev.reason : ''}`); this.lost(); };
+  },
+  // 连接没了（断开，或者看门狗判定卡死）：还没被 Deepgram 定稿的那段声音放回队列，连上后重发，字不会丢
+  lost(){
+    const ws = this.ws; this.ws = null;
+    if (ws){ ws.onclose = ws.onmessage = null; try { ws.close(); } catch(e){} }
+    const back = this.sent.filter(f => f.t + f.d > this.confirmed);
+    this.sent = [];
+    this.queue = back.concat(this.queue);
+    if (this.queue.length > 400) this.queue.splice(0, this.queue.length - 400);
+    // 灰字先留在屏幕上，重发的声音识别出来后会被新结果替换
+    if (back.length) log(`重发还没定稿的声音 ${(back.length * back[0].d).toFixed(1)} 秒`);
+    updateProv();
+    if (this.closing || L.state === 'idle' || L.engine !== 'dg') return;
+    if (this.opened){ this.fails = 0; this.retryAt = 0; }   // 用着用着断了，马上重连
+    else this.failed();                                       // 根本连不上
+  },
+  // 看门狗：每 2 秒看一眼连接是不是还活着
+  watch(){
+    if (L.state === 'idle' || L.engine !== 'dg'){ clearInterval(this.dog); return; }
+    const ws = this.ws, now = Date.now();
+    if (L.state === 'paused'){ try { if (ws && ws.readyState === 1) ws.send('{"type":"KeepAlive"}'); } catch(e){} return; }
+    if (!ws) return;
+    if (ws.readyState === 0 && now - this.openAt > 8000){ log('Deepgram 连接超时'); this.lost(); return; }
+    if (ws.readyState !== 1) return;
+    if (now - this.lastMsgAt > 10000 && now - this.lastSendAt < 3000){ log(`Deepgram ${Math.round((now - this.lastMsgAt) / 1000)} 秒没回应，重连`); this.lost(); return; }
+    if (ws.bufferedAmount > 256 * 1024){ log(`网络堵了（积压 ${Math.round(ws.bufferedAmount / 1024)}KB 没发出去），重连`); this.lost(); }
   },
   failed(){
     this.fails++;
@@ -755,12 +812,13 @@ const DG = {
     if (this.fails >= 3 && S.keys.groq.trim()){
       toast('Deepgram 连不上（检查 key 和网络），这节课先改用按句识别', 7000);
       log('Deepgram 连续失败，改用 Groq Whisper');
-      L.engine = 'whisper'; L.seg = null; L.hist = []; this.queue = []; updateProv();
+      this.endLine('flush');
+      L.engine = 'whisper'; L.seg = null; L.hist = []; this.queue = []; this.sent = []; updateProv();
     } else if (this.fails === 3) toast('Deepgram 连不上，检查 key 和网络', 7000);
   },
   push(f, t){
-    this.queue.push({t, buf:toPcm16(f, L.rate)});
-    if (this.queue.length > 200) this.queue.shift();     // 断线时最多攒 17 秒左右，连上后补发
+    this.queue.push({t, d:f.length / L.rate, buf:toPcm16(f, L.rate)});
+    if (this.queue.length > 400) this.queue.shift();     // 断线时最多攒 34 秒左右，连上后补发
     if (this.ws && this.ws.readyState === 1) this.flush();
     else if (!this.ws && Date.now() >= this.retryAt) this.open();
   },
@@ -770,50 +828,70 @@ const DG = {
       const it = this.queue.shift();
       if (this.offset === null) this.offset = it.t;   // 这条连接的 0 秒对应课堂的哪一刻
       ws.send(it.buf);
+      this.sent.push(it); this.lastSendAt = Date.now();
     }
+    while (this.sent.length && this.sent[0].t < this.sent[this.sent.length - 1].t - 40) this.sent.shift();   // 只留最近 40 秒备重发
   },
   onMsg(data){
     let m; try { m = JSON.parse(data); } catch(e){ return; }
-    if (m.type === 'UtteranceEnd'){ this.endLine(); return; }
+    if (m.type === 'UtteranceEnd'){ if (this.cur && !this.cur.im.length) this.endLine(); return; }   // 停顿了，而且后面没有新词
     if (m.type !== 'Results') return;
+    const base = this.offset || 0;
     const alt = m.channel && m.channel.alternatives && m.channel.alternatives[0];
     const tx = ((alt && alt.transcript) || '').trim();
-    if (tx && !this.cur) this.newLine((this.offset || 0) + (m.start || 0));
+    let words = ((alt && alt.words) || []).map(w => ({w:w.punctuated_word || w.word, s:base + w.start}));
+    if (tx && !words.length) words = [{w:tx, s:base + (m.start || 0)}];
+    if (m.is_final){ const fe = base + (m.start || 0) + (m.duration || 0); if (fe > this.confirmed) this.confirmed = fe; }
+    if (tx && !this.cur) this.newLine(words[0].s);
     const c = this.cur; if (!c) return;
-    if (m.is_final){ if (tx) c.line.en = (c.line.en ? c.line.en + ' ' : '') + tx; c.line.im = ''; }
-    else c.line.im = tx;
+    if (m.is_final){
+      if (tx) c.line.en = (c.line.en ? c.line.en + ' ' : '') + tx;
+      c.im = c.im.filter(w => w.s >= this.confirmed - 0.02);   // 定稿范围之后的灰字留着，不闪
+    } else c.im = words;
+    c.line.im = c.im.map(w => w.w).join(' ');
     renderLine(c.line);
-    const words = c.line.en.split(/\s+/).filter(Boolean).length;
-    if (m.is_final && (m.speech_final || (/[.?!]$/.test(tx) && words >= 8) || words >= 40)) this.endLine();
+    if (!m.is_final) return;
+    // 断行只看句子：句号/问号/叹号结尾（至少 4 个词），或者太长了
+    const n = c.line.en.split(/\s+/).filter(Boolean).length;
+    if ((/[.?!]["')\]]?$/.test(c.line.en) && n >= 4) || n >= 40 || (n && this.confirmed - c.line.t > 25 && m.speech_final)) this.endLine('carry');
   },
   newLine(t){
     const line = {id:L.nextId++, t, en:'', im:'', zh:'', status:'live'};
-    L.lines.push(line); this.cur = {line};
+    L.lines.push(line); this.cur = {line, im:[]};
   },
-  endLine(){
+  // carry：下一句已经冒出来的灰字挪到新的一行；flush：连接要结束了，灰字也当定稿
+  endLine(mode){
     const c = this.cur; if (!c) return; this.cur = null;
-    const line = c.line, text = (line.en || line.im || '').trim();
+    const line = c.line, imText = c.im.map(w => w.w).join(' ');
+    let text = line.en.trim();
+    if (mode === 'flush' && imText) text = (text ? text + ' ' : '') + imText;
     delete line.im;
-    if (!text){ removeLine({lines:L.lines}, line); return; }
-    line.en = text; line.status = 'tr';
-    renderLine(line); dirty(L.session, L.lines);
-    Q.tr.push({line, session:L.session, lines:L.lines}); runTr(); updateProv();
+    if (!text) removeLine({lines:L.lines}, line);
+    else {
+      line.en = text; line.status = 'tr';
+      renderLine(line); dirty(L.session, L.lines);
+      Q.tr.push({line, session:L.session, lines:L.lines}); runTr(); updateProv();
+    }
+    if (mode === 'carry' && c.im.length){
+      this.newLine(c.im[0].s); this.cur.im = c.im; this.cur.line.im = imText; renderLine(this.cur.line);
+    }
   },
   // 暂停：让 Deepgram 把已经听到的马上定稿
   pause(){
     try { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({type:'Finalize'})); } catch(e){}
-    setTimeout(() => this.endLine(), 1500);
+    setTimeout(() => this.endLine('flush'), 1500);
   },
   async stop(){
-    this.closing = true;
+    this.closing = true; clearInterval(this.dog);
     const ws = this.ws;
     if (ws && ws.readyState === 1){
+      ws.onclose = null;   // 正常结束，不走断线重发
       try { ws.send(JSON.stringify({type:'CloseStream'})); } catch(e){}
       // 等最后几个词回来
       await new Promise(r => { const tm = setTimeout(r, 3000); ws.addEventListener('close', () => { clearTimeout(tm); r(); }); });
     }
     try { if (ws) ws.close(); } catch(e){}
-    this.ws = null; this.endLine(); this.queue = [];
+    this.ws = null; this.endLine('flush'); this.queue = []; this.sent = [];
   },
 };
 
@@ -836,6 +914,11 @@ function toPcm16(f, rate){
 function onFrame(f){
   if (L.state !== 'running') return;
   const n = f.length, t = L.frames / L.rate; L.frames += n;
+  // 收到的声音比实际过去的时间少，说明中间丢了（页面切到后台、设备太忙）
+  if ((L.frames / n) % 128 === 0){
+    const lost = (performance.now() - L.wall0 - L.pausedMs) / 1000 - L.frames / L.rate;
+    if (lost - L.lostLogged > 1){ log(`声音少了约 ${lost.toFixed(1)} 秒（页面切到后台或设备太忙）`); L.lostLogged = lost; }
+  }
   let sum = 0; for (let i = 0; i < n; i++) sum += f[i] * f[i];
   const rms = Math.sqrt(sum / n);
   if (L.engine === 'dg'){
@@ -1124,7 +1207,9 @@ const Cloud = {
     }
     this.save();
 
-    // 录音：每段录完就传；传上去的，本机超过保留天数就删（要听时再从云端下载）
+    // 录音：下课后再传（上课时不占网络，免得实时识别卡住）；传上去的，本机超过保留天数就删（要听时再从云端下载）
+    if (changed && $('#pHistory').classList.contains('show')) renderHistory();
+    if (L.state !== 'idle') return;
     const sessNow = new Map(((await DB.allSessions()) || []).map(s => [s.id, s]));
     const keepMs = Math.max(0, +S.keepDays || 0) * 86400e3;
     for (const r of await DB.allSegs()){
@@ -1148,7 +1233,6 @@ const Cloud = {
         log(`本机录音已清理：${sess.title} 第${r.idx + 1}段（云端还有）`);
       }
     }
-    if (changed && $('#pHistory').classList.contains('show')) renderHistory();
   },
 };
 
@@ -1188,12 +1272,19 @@ function renderLine(l){
   el.innerHTML = lineHtml(l);
   if (stick) box.scrollTop = box.scrollHeight;
 }
+// 跟随最新：只有手指/鼠标滚动才算"我在往回看"，程序自己滚动不算；
+// 往回看时停 12 秒没再碰，自动回到最新
+let touchAt = 0;
+['touchstart', 'touchmove', 'wheel', 'mousedown'].forEach(ev => $('#subs').addEventListener(ev, () => { touchAt = Date.now(); }, {passive:true}));
 $('#subs').addEventListener('scroll', () => {
+  if (Date.now() - touchAt > 1500) return;
   const b = $('#subs');
   stick = b.scrollTop + b.clientHeight >= b.scrollHeight - 60;
   $('#jump').style.display = stick ? 'none' : 'block';
 });
-$('#jump').onclick = () => { const b = $('#subs'); b.scrollTop = b.scrollHeight; };
+function toLatest(){ const b = $('#subs'); stick = true; b.scrollTop = b.scrollHeight; $('#jump').style.display = 'none'; }
+$('#jump').onclick = toLatest;
+setInterval(() => { if (!stick && L.state !== 'idle' && Date.now() - touchAt > 12000) toLatest(); }, 1000);
 
 function updateButtons(){
   const st = L.state;
@@ -1483,7 +1574,7 @@ document.addEventListener('visibilitychange', () => {
   if (L.state !== 'idle'){
     keepAwake(true);
     if (L.ctx && L.ctx.state !== 'running') L.ctx.resume().catch(() => {});
-    if (L.hidden){ L.hidden = false; toast('刚才页面切到了后台或锁屏，这段时间可能没有识别到。', 6000); }
+    if (L.hidden){ L.hidden = false; toast('刚才切到了别的标签页/App 或锁屏，iPad 会把这个网页的麦克风关掉，这段没识别到。要看别的资料，用分屏把它放在旁边。', 8000); }
   }
 });
 window.addEventListener('beforeunload', e => { if (L.state !== 'idle'){ e.preventDefault(); e.returnValue = ''; } });
