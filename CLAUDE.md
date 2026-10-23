@@ -53,7 +53,9 @@
 - **时间轴一律用 `realNow()`**（真实时间减暂停），不要用收到的采样数算；Deepgram 返回的时间用 `DG.realT()` 查表换成课堂时间
 - **收音"全场"模式**关掉 iPad 的 noiseSuppression 和 autoGainControl（它们会把远处的人声当噪声压掉，像"锁定主讲人"）；"只听近处"打开
 - **Deepgram 实时**：10 秒没回应 / 网络积压 / 连接超时都重连，并重发还没定稿的声音；只在句号问号叹号（≥4 词）或 40 词时断行；定稿删掉的词留成存疑 `⟦…⟧`（淡色显示、不送翻译、导出写成 `(xx?)`）；`diarize` 换人另起一行
-- **录音**：每 3 分钟 stop 一次得到完整文件（iPad 上 `MediaRecorder.start(timeslice)` 拼出来的文件会坏）；结束时**先停录音再关麦克风**，反过来 iPad 上文件会坏；暂停时收尾一段，继续时开新的一段
+- **录音默认 MP3 方式**（`mp3Start` `mp3Push` `mp3Cut`）：采音拿到的声音当场用 lamejs 压成 MP3，一条连续的流，每 60 秒存一段（`cont:true`），段首尾直接拼接就是完整文件、没有接缝；少收的声音按 `realNow()` 补静音。lamejs 加载不了才退回下面的 MediaRecorder 方式（MediaRecorder 分段在合并处有明显断点，这是改掉它的原因）
+- **回放**：句子/逐词高亮跟着播放（`HL` `plHL`），逐词时间存在行的 `ws` 里（实时和 Deepgram 精修有；老记录和 Whisper 按词长估算）；播放器在顶部固定
+- **MediaRecorder 录音（备用）**：每 3 分钟 stop 一次得到完整文件（iPad 上 `MediaRecorder.start(timeslice)` 拼出来的文件会坏）；结束时**先停录音再关麦克风**，反过来 iPad 上文件会坏；暂停时收尾一段，继续时开新的一段
 - **iPad 播放**：只有点击当下才允许 `play()`，所以点击时先 `plUnlock()` 用静音解锁；音频先读进内存再 `createObjectURL`，失败再转 data URL
 - **iPad 分享**：`navigator.share` 也要点击当下，合成 MP3 耗时，所以导出分两步（合成好后按钮变"保存整节课录音"再点）
 - **合成 MP3**：lamejs 1.2.1（cdnjs，用时才加载），22.05kHz 40kbps 单声道；段之间按 `t0` 补静音保证对齐；下课后同步时由录音那台设备自动合成、传成功后才删 Drive 和本机的小段

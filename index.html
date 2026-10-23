@@ -91,8 +91,14 @@ a{color:#7fb7ff}
 .sess .info{flex:1;min-width:0}
 .sess .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sess .meta{color:var(--muted);font-size:12px;margin-top:3px}
-.pl{display:flex;align-items:center;gap:10px;margin:6px 0 10px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
-.pl button{width:44px;height:40px;padding:0;font-size:18px}
+.pl{display:flex;align-items:center;gap:8px;margin:-14px -16px 10px;background:var(--panel);border-bottom:1px solid var(--line);padding:8px 12px;position:-webkit-sticky;position:sticky;top:-14px;z-index:3}
+.pl button{width:44px;height:40px;padding:0;font-size:18px;flex:none}
+.pl #plBack,.pl #plRate{font-size:14px}
+.pl #plFollow{width:auto;padding:0 10px;font-size:13px;background:#2d6b4a;color:#fff}
+#sessLines .line.cur{background:#1b222b;box-shadow:inset 3px 0 0 var(--accent)}
+#sessLines .line.cur .w{color:var(--muted)}
+#sessLines .line.cur .w.done{color:var(--text)}
+#sessLines .line.cur .w.now{background:#2a4a6b;color:#fff;border-radius:4px;box-shadow:0 0 0 2px #2a4a6b}
 .pl input{flex:1;min-width:0}
 #plTime{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 
@@ -134,8 +140,11 @@ a{color:#7fb7ff}
   <div class="body">
     <div id="pl" class="pl">
       <button id="plBtn" aria-label="播放">▶</button>
+      <button id="plBack" aria-label="后退 5 秒">↺5</button>
       <input type="range" id="plBar" min="0" max="1" step="0.1" value="0">
       <span id="plTime"></span>
+      <button id="plRate" aria-label="播放速度">1×</button>
+      <button id="plFollow" style="display:none">回到当前</button>
     </div>
     <audio id="player" preload="auto"></audio>
     <div class="row">
@@ -148,7 +157,7 @@ a{color:#7fb7ff}
       <button id="btnLiveVer" style="display:none">看实时版</button>
     </div>
     <div class="hint" id="refineInfo">精修：下课后把整节课录音重新识别一遍（更全、区分说话人），再结合上下文重新翻译。需要时才点，会用一点 Deepgram 额度。</div>
-    <div class="hint" id="sessHint">点任意一句，录音跳到那里播放。</div>
+    <div class="hint" id="sessHint">点任意一个词，录音从那里开始播。</div>
     <div id="sessLines" class="clickable" style="margin-top:14px"></div>
   </div>
 </div>
@@ -744,25 +753,28 @@ async function start(){
   let ok = false;
   for (let i = 0; i < CAP_MODES.length && !ok; i++){ ok = await buildCapture(i); if (!ok) L.capRatios[i] = -1; }
   if (!ok){ toast('音频处理启动失败，换个浏览器试试'); stream.getTracks().forEach(t => t.stop()); return; }
-  L.wall0 = performance.now();
-  capWindowReset();
-
   $('#subs').innerHTML = ''; stick = true;
 
+  L.mp3 = null;
   if (L.save){
     const now = new Date();
-    const mime = pickMime();
+    // 录音默认当场压成 MP3（整节课一条连续的声音，没有接缝）；压缩库加载不了才用系统录音
+    let mime = 'audio/mpeg';
+    try { await new Promise((res, rej) => { loadLame().then(res, rej); setTimeout(() => rej(new Error('超时')), 6000); }); }
+    catch(e){ mime = pickMime(); log('MP3 压缩库没加载上（' + e.message + '），录音改用系统录音方式'); }
     L.session = {id:'s' + now.getTime(), title:defaultTitle(now), createdAt:now.getTime(), duration:0, mime, segs:[], lines:[], status:'recording'};
     try { await DB.putSession(L.session); } catch(e){ toast('本地存储不可用，这次不保存：' + e.message); L.save = false; L.session = null; }
     L.mime = L.save ? mime : ''; L.segIdx = 0; L.rec = null;
     if (L.save && !mime) toast('这个浏览器不支持录音，只保存文字');
   } else { L.session = null; L.mime = ''; L.rec = null; }
+  L.wall0 = performance.now();   // 准备好了才开始计时（等压缩库、存数据库的时间不算进课堂时间）
+  capWindowReset();
 
   L.engine = engine;
   L.state = 'running';
   log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}`);
   if (engine === 'dg') DG.begin();
-  if (L.mime){ recStart(); clearInterval(L.recTimer); L.recTimer = setInterval(recRotate, 1000); }
+  if (L.mime){ if (L.mime === 'audio/mpeg') mp3Start(); else recStart(); clearInterval(L.recTimer); L.recTimer = setInterval(recRotate, 1000); }
   clearInterval(L.capTimer); L.capTimer = setInterval(capTick, 1000);
   keepAwake(true);
   updateButtons(); updateProv();
@@ -774,7 +786,8 @@ function pause(){
   if (L.state !== 'running') return;
   if (L.engine === 'dg') DG.pause(); else flushSeg();
   L.state = 'paused'; L.pausedAt = performance.now();
-  recStop();   // 暂停时把这一段录音收尾存好，继续时开新的一段
+  // 暂停时把这一段录音收尾存好，继续时开新的一段（MP3 方式接着压，声音还是连续的）
+  if (L.mp3) mp3Cut(); else recStop();
   $('#level i').style.width = '0';
   updateButtons();
 }
@@ -784,7 +797,7 @@ function resume(){
   L.pausedMs += performance.now() - L.pausedAt;
   L.state = 'running';
   capWindowReset();
-  if (L.mime) recStart();
+  if (L.mime && !L.mp3) recStart();
   updateButtons();
 }
 
@@ -804,6 +817,7 @@ function recStart(){
   L.rec = seg;
 }
 function recStop(){
+  if (L.mp3) return mp3Cut(true);
   const seg = L.rec; L.rec = null;
   if (!seg) return Promise.resolve();
   seg.t1 = realNow();
@@ -812,6 +826,8 @@ function recStop(){
 }
 // 满 3 分钟：先开新的一段再停旧的，中间不漏
 function recRotate(){
+  const m = L.mp3;
+  if (m){ if (L.state === 'running' && m.seg && m.total / MP3_RATE - m.seg.t0 >= MP3_SEG) mp3Cut(); return; }
   if (L.state !== 'running' || !L.rec || realNow() - L.rec.t0 < REC_SEG) return;
   const old = L.rec; old.t1 = realNow();
   recStart();
@@ -822,11 +838,64 @@ async function recSave(seg){
   if (!seg.parts.length){ log(`录音第${seg.idx + 1}段是空的`); return; }
   const blob = new Blob(seg.parts, {type:seg.mime});
   const meta = {idx:seg.idx, t0:seg.t0, dur:Math.max(0, (seg.t1 == null ? realNow() : seg.t1) - seg.t0), mime:seg.mime};
+  if (seg.cont) meta.cont = true;   // MP3 方式：和前后段是同一条声音，首尾直接接起来就行
   try { await DB.putSeg(Object.assign({sessionId:seg.sess.id, blob, own:true}, meta)); }
   catch(e){ toast('录音保存失败：' + e.message); log('录音保存失败：' + e.message); return; }
   seg.sess.segs = (seg.sess.segs || []).filter(s => s.idx !== meta.idx).concat(meta).sort((a, b) => a.idx - b.idx);
   await persistNow(seg.sess);
   log(`录音第${seg.idx + 1}段已存 ${(blob.size / 1048576).toFixed(1)}MB ${Math.round(meta.dur)}秒`);
+}
+
+/* 录音（MP3 方式，默认）：采音拿到的声音当场降到 22.05kHz、压成 MP3，整节课是一条连续的声音。
+   每 60 秒存一段进本机（只为中途出事少丢一点），这些段首尾一接就是完整的文件，没有接缝 */
+const MP3_SEG = 60;
+function mp3Start(){
+  L.mp3 = {enc:new lamejs.Mp3Encoder(1, MP3_RATE, MP3_KBPS), buf:new Int16Array(1152 * 4), k:0, acc:0, n:0, pos:0, total:0, seg:null};
+}
+function mp3Put(m, v){
+  v = Math.max(-1, Math.min(1, v));
+  m.buf[m.k++] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  if (m.k === m.buf.length) mp3Enc(m);
+}
+function mp3Enc(m){
+  if (!m.k) return;
+  if (!m.seg) m.seg = {idx:L.segIdx++, t0:m.total / MP3_RATE, t1:null, parts:[], mime:'audio/mpeg', cont:true, sess:L.session};
+  const out = m.enc.encodeBuffer(m.buf.subarray(0, m.k));
+  m.total += m.k; m.k = 0;
+  if (out.length) m.seg.parts.push(new Uint8Array(out));
+}
+// f：一块声音（采音的采样率），t：这块开始的课堂时间
+function mp3Push(f, t){
+  const m = L.mp3, ratio = L.rate / MP3_RATE;
+  // 前面少收了声音（换采音方式、iPad 卡了一下）：补同样长的静音，录音的时间和字幕一直对得上
+  const lack = Math.round(t * MP3_RATE) - (m.total + m.k);
+  const first = !(m.total + m.k);
+  if (lack > (first ? 0 : MP3_RATE * 0.5)){
+    for (let i = 0; i < lack; i++) mp3Put(m, 0);
+    if (!first) log(`录音：少收了 ${(lack / MP3_RATE).toFixed(1)} 秒声音，补了静音对齐时间`);
+  }
+  // 换采样率：几个采样取平均算一个（麦克风采样率比 22.05kHz 低时重复）
+  for (let i = 0; i < f.length; i++){
+    m.acc += f[i]; m.n++;
+    if (++m.pos >= ratio){
+      const v = m.acc / m.n; m.acc = 0; m.n = 0;
+      do { mp3Put(m, v); m.pos -= ratio; } while (m.pos >= ratio);
+    }
+  }
+}
+// 这一段收尾存好；final：整节课结束，把压缩器里剩的也倒出来
+function mp3Cut(final){
+  const m = L.mp3; if (!m) return Promise.resolve();
+  mp3Enc(m);
+  if (final){
+    L.mp3 = null;
+    const out = m.enc.flush();
+    if (out.length && m.seg) m.seg.parts.push(new Uint8Array(out));
+  }
+  const seg = m.seg; m.seg = null;
+  if (!seg) return Promise.resolve();
+  seg.t1 = m.total / MP3_RATE;
+  return recSave(seg);
 }
 
 async function end(){
@@ -976,6 +1045,7 @@ const DG = {
       const line = this.cur.line;
       const piece = w.doubt ? '⟦' + w.w + '⟧' : w.w;
       line.en = line.en ? (w.doubt && /⟧$/.test(line.en) ? line.en.slice(0, -1) + ' ' + w.w + '⟧' : line.en + ' ' + piece) : piece;
+      addWordTimes(line, w);
     }
     if (dropped.length) log(`识别删掉了 ${dropped.length} 个词，留成存疑：${dropped.map(w => w.w).join(' ')}`);
     const c = this.cur; if (!c) return;
@@ -996,7 +1066,7 @@ const DG = {
     const c = this.cur; if (!c) return; this.cur = null;
     const line = c.line, imText = c.im.map(w => w.w).join(' ');
     let text = line.en.trim();
-    if (mode === 'flush' && imText) text = (text ? text + ' ' : '') + imText;
+    if (mode === 'flush' && imText){ text = (text ? text + ' ' : '') + imText; c.im.forEach(w => addWordTimes(line, w)); }
     delete line.im;
     if (!text) removeLine({lines:L.lines}, line);
     else {
@@ -1050,6 +1120,7 @@ function onFrame(f){
   let sum = 0; for (let i = 0; i < n; i++) sum += f[i] * f[i];
   const rms = Math.sqrt(sum / n);
   $('#level i').style.width = Math.min(100, rms * 900) + '%';
+  if (L.mp3) mp3Push(f, t);
   if (L.engine === 'dg'){ DG.push(f, t); return; }
   // 门槛取在最近 8 秒的"安静水平"和"大声水平"之间。
   // 老师连续讲课时，安静水平取的是词和句之间的空隙，不会被讲话声越带越高
@@ -1140,7 +1211,7 @@ async function runTr(){
 const dirtyTimers = new Map();
 function dirty(sess, lines){
   if (!sess) return;
-  sess.lines = lines.map(l => l.spk === undefined ? {t:l.t, en:l.en, zh:l.zh} : {t:l.t, en:l.en, zh:l.zh, spk:l.spk});
+  sess.lines = lines.map(l => Object.assign({t:l.t, en:l.en, zh:l.zh}, l.spk === undefined ? {} : {spk:l.spk}, l.ws ? {ws:l.ws} : {}));
   if (dirtyTimers.has(sess.id)) return;
   dirtyTimers.set(sess.id, setTimeout(() => { dirtyTimers.delete(sess.id); persistNow(sess); }, 3000));
 }
@@ -1408,7 +1479,7 @@ const Cloud = {
         txtDone[s.id] = s.updatedAt || 0; lsSet('lt.txtSync', txtDone);
       }
     }
-    const audioMeta = (sid, idx, mime) => ({name:`录音 ${String(idx + 1).padStart(2, '0')}${(mime || '').includes('webm') ? '.webm' : '.m4a'}`, appProperties:{lt:'audio', sid, idx:String(idx)}});
+    const audioMeta = (sid, idx, mime) => ({name:`录音 ${String(idx + 1).padStart(2, '0')}${(mime || '').includes('webm') ? '.webm' : (mime || '').includes('mpeg') ? '.mp3' : '.m4a'}`, appProperties:{lt:'audio', sid, idx:String(idx)}});
     // 以前传到隐藏数据里的录音，搬到看得见的文件夹
     for (const f of byName.values()){
       const m = f.name.match(/^audio-(.+)-(\d+)$/); if (!m) continue;
@@ -1427,7 +1498,8 @@ const Cloud = {
     // 下课后：几段小录音合成一个"整节课录音.mp3"，Drive 和本机都只留这一个（只由录这节课的设备做）
     const mergeFail = lsGet('lt.mergeFail', {});
     for (const s of sessNow.values()){
-      if (!mine(s) || (s.segs || []).length < 2 || (P.sess && P.sess.id === s.id) || (mergeFail[s.id] || 0) >= 2) continue;
+      const sg = s.segs || [];   // MP3 方式录的只有一段也走这里，Drive 里统一叫"整节课录音.mp3"
+      if (!mine(s) || !(sg.length >= 2 || (sg.length === 1 && sg[0].cont)) || (P.sess && P.sess.id === s.id) || (mergeFail[s.id] || 0) >= 2) continue;
       const show = p => { this.msg = `正在合成「${s.title}」的整节课录音… ${Math.round(p * 100)}%`; renderCloud(); };
       try {
         show(0);
@@ -1508,6 +1580,31 @@ const spkName = s => s === undefined || s === null ? '' : '说话人 ' + (s + 1)
 const spkTag = s => spkName(s) ? `<span class="spk spk${s % 6}">${spkName(s)}</span>` : '';
 // 英文：⟦…⟧ 里是识别删掉的存疑词，显示成淡色斜体
 const enMarkup = t => esc(t || '').replace(/⟦([^⟧]*)(⟧|$)/g, '<span class="doubt">$1</span>');
+// 逐词时间 l.ws：英文按空格分开后每个词一个开始时间（秒），回放时逐词高亮用
+function addWordTimes(l, w){
+  const n = splitW(w.w).length, e = w.e > w.s ? w.e : w.s;
+  for (let k = 0; k < n; k++) (l.ws || (l.ws = [])).push(Math.round((w.s + (e - w.s) * k / n) * 100) / 100);
+}
+// 每个词的开始时间；没存逐词时间的（老记录、Whisper）按词的长短把这句的时长分下去
+function wordTimes(l, nextT){
+  const toks = splitW(l.en);
+  if (l.ws && l.ws.length >= toks.length) return l.ws.slice(0, toks.length);
+  let end = Math.min(nextT == null ? Infinity : nextT - 0.2, l.t + toks.length * 0.42 + 0.8);
+  if (!(end > l.t)) end = l.t + toks.length * 0.3;
+  const wt = toks.map(x => x.replace(/[⟦⟧]/g, '').length + 2), sum = wt.reduce((a, b) => a + b, 0) || 1;
+  let acc = 0;
+  return wt.map(x => { const s = l.t + (end - l.t) * acc / sum; acc += x; return s; });
+}
+// 历史记录里的英文：每个词包一层，好逐词高亮、点词跳过去
+function enWordsHtml(en){
+  let doubt = false;
+  return splitW(en).map((tok, k) => {
+    if (tok.startsWith('⟦')){ doubt = true; tok = tok.slice(1); }
+    const d = doubt;
+    if (tok.endsWith('⟧')){ doubt = false; tok = tok.slice(0, -1); }
+    return `<span class="w${d ? ' doubt' : ''}" data-k="${k}">${esc(tok)}</span>`;
+  }).join(' ');
+}
 // l.shown：已经"打"出来几个词（没有这个字段就是全部显示）
 function enHtml(l){
   if (l.status === 'asr') return '识别中…';
@@ -1610,16 +1707,58 @@ function plReset(){
   if (P.url) URL.revokeObjectURL(P.url);
   Object.assign(P, {sess:null, segs:[], i:-1, url:null, total:0});
   $('#plBtn').textContent = '▶';
+  HL.follow = true; $('#plFollow').style.display = 'none';
 }
+function plCur(){ const a = $('#player'), seg = P.segs[P.i]; return seg ? seg.t0 + (a.currentTime || 0) : +$('#plBar').value || 0; }
 function plShow(){
-  const a = $('#player'), seg = P.segs[P.i];
-  const cur = seg ? seg.t0 + (a.currentTime || 0) : 0;
+  const a = $('#player'), cur = plCur();
   if (!P.seeking) $('#plBar').value = cur;
   $('#plTime').textContent = fmtT(cur) + ' / ' + fmtT(P.total);
   $('#plBtn').textContent = a.paused ? '▶' : '⏸';
+  if (!P.seeking) plHL(cur);
 }
+/* 回放跟随：播到哪句，那句高亮、自动滚到屏幕中间；句子里说过的词变亮，正在说的词加底色。
+   手指自己滑动字幕就先不跟，点"回到当前"再跟 */
+const HL = {lines:[], times:[], els:[], li:-1, wi:-1, follow:true};
+function hlFind(t){
+  const ls = HL.lines; let lo = 0, hi = ls.length - 1, li = -1;
+  while (lo <= hi){ const m = (lo + hi) >> 1; if (ls[m].t <= t + 0.05) { li = m; lo = m + 1; } else hi = m - 1; }
+  return li;
+}
+function plHL(t, jump){
+  if (!HL.lines.length) return;
+  const li = hlFind(t);
+  if (li !== HL.li){
+    const old = HL.els[HL.li];
+    if (old){ old.classList.remove('cur'); old.querySelectorAll('.w.done,.w.now').forEach(x => x.classList.remove('done', 'now')); }
+    HL.li = li; HL.wi = -1;
+    const el = HL.els[li];
+    if (el){ el.classList.add('cur'); if (HL.follow) hlScroll(el, jump); }
+  }
+  const el = HL.els[li]; if (!el) return;
+  const ts = HL.times[li] || (HL.times[li] = wordTimes(HL.lines[li], (HL.lines[li + 1] || {}).t));
+  let wi = -1; for (let k = 0; k < ts.length && ts[k] <= t + 0.05; k++) wi = k;
+  if (wi === HL.wi) return;
+  HL.wi = wi;
+  const ws = el.querySelectorAll('.w');
+  ws.forEach((w, k) => { w.classList.toggle('done', k <= wi); w.classList.toggle('now', k === wi); });
+}
+function hlScroll(el, jump){
+  const box = $('#pSession .body'), bar = $('#pl').offsetHeight;
+  const r = el.getBoundingClientRect(), br = box.getBoundingClientRect();
+  const want = box.scrollTop + r.top - br.top - bar - (box.clientHeight - bar) * 0.3;
+  try { box.scrollTo({top:Math.max(0, want), behavior:jump ? 'auto' : 'smooth'}); } catch(e){ box.scrollTop = want; }
+}
+function hlFollow(on){
+  const was = HL.follow; HL.follow = on;
+  $('#plFollow').style.display = on ? 'none' : '';
+  if (on && !was && HL.els[HL.li]) hlScroll(HL.els[HL.li], true);
+}
+// 播放时每一帧更新（timeupdate 一秒才几次，逐词高亮会跟不上）
+function hlLoop(){ HL.raf = 0; if ($('#player').paused || !P.segs.length) return; plShow(); HL.raf = requestAnimationFrame(hlLoop); }
 async function segBlob(sess, seg){
   if (seg.blob) return seg.blob;   // 老格式，已经拼好
+  if (seg.parts){ const bs = []; for (const g of seg.parts) bs.push(await segBlob(sess, g)); return new Blob(bs, {type:'audio/mpeg'}); }   // MP3 方式的几段，接成一个
   const r = await DB.getSeg(sess.id, seg.idx);
   if (r && r.blob) return r.blob;
   if (!Cloud.st.on) throw new Error('这段录音不在本机，开启云同步后才能从云端取');
@@ -1640,6 +1779,7 @@ function plUnlock(){
   const a = $('#player');
   if (!silentUrl) silentUrl = URL.createObjectURL(encodeWav([new Float32Array(1600)], 1600, 16000));
   a.src = silentUrl; a.play().then(() => a.pause()).catch(() => {});
+  P.i = -1;   // 播放器里换成了静音，之后要重新装录音
 }
 function loadSrc(a, url){
   return new Promise((res, rej) => {
@@ -1691,8 +1831,15 @@ async function decodeAt(blob, rate){
   return new Promise((res, rej) => new OfflineAudioContext(1, 1, rate).decodeAudioData(ab, res, e => rej(new Error('录音解码失败' + (e && e.message ? '：' + e.message : '')))));
 }
 async function mergeToMp3(sess, onProg){
-  await loadLame();
   const segs = (sess.segs || []).slice().sort((a, b) => a.t0 - b.t0);
+  // MP3 方式录的：本来就是一条连续的 MP3，首尾接起来就行，不用重新压
+  if (segs.every(g => g.cont)){
+    const parts = [];
+    for (let i = 0; i < segs.length; i++){ parts.push(await segBlob(sess, segs[i])); if (onProg) onProg((i + 1) / segs.length); }
+    const last = segs[segs.length - 1];
+    return {blob:new Blob(parts, {type:'audio/mpeg'}), dur:last.t0 + last.dur};
+  }
+  await loadLame();
   const enc = new lamejs.Mp3Encoder(1, MP3_RATE, MP3_KBPS), out = [];
   let total = 0;
   for (let i = 0; i < segs.length; i++){
@@ -1735,11 +1882,12 @@ function wordsToLines(words){
   for (const w of words){
     const text = w.punctuated_word || w.word, spk = w.speaker;
     if (!text) continue;
-    if (!cur || (spk !== undefined && spk !== cur.spk) || w.start - cur.end > 2){ cur = {t:w.start, en:'', spk, end:w.end, n:0}; lines.push(cur); }
+    if (!cur || (spk !== undefined && spk !== cur.spk) || w.start - cur.end > 2){ cur = {t:w.start, en:'', spk, end:w.end, n:0, ws:[]}; lines.push(cur); }
     cur.en = cur.en ? cur.en + ' ' + text : text; cur.end = w.end; cur.n++;
+    addWordTimes(cur, {w:text, s:w.start, e:w.end});
     if ((/[.?!]["')\]]?$/.test(text) && cur.n >= 4) || cur.n >= 40) cur = null;
   }
-  return lines.map(l => l.spk === undefined ? {t:l.t, en:l.en, zh:''} : {t:l.t, en:l.en, zh:'', spk:l.spk});
+  return lines.map(l => Object.assign({t:l.t, en:l.en, zh:'', ws:l.ws}, l.spk === undefined ? {} : {spk:l.spk}));
 }
 async function refineDeepgram(blob){
   const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:'en', smart_format:'true', punctuate:'true', diarize:'true', utterances:'true'});
@@ -1776,6 +1924,8 @@ async function whisperFile(blob){
 }
 async function refineWhisper(sess, segs, onProg){
   const units = [];
+  // MP3 方式录的一分钟一段，先接成一整个再切大块，免得请求太多次
+  if (segs.length > 1 && segs.every(g => g.cont)) segs = [{blob:(await mergeToMp3(sess)).blob, t0:segs[0].t0, mime:'audio/mpeg'}];
   for (const g of segs){
     const blob = await segBlob(sess, g);
     if (blob.size <= 20e6 || !/mpeg/.test(g.mime)) units.push({blob, t0:g.t0});
@@ -1901,11 +2051,36 @@ async function plAt(t, play = true){
 }
 (() => {
   const a = $('#player');
-  ['timeupdate', 'play', 'pause'].forEach(ev => a.addEventListener(ev, plShow));
+  ['timeupdate', 'play', 'pause', 'seeked'].forEach(ev => a.addEventListener(ev, plShow));
+  a.addEventListener('play', () => { if (!HL.raf) HL.raf = requestAnimationFrame(hlLoop); });
+  a.addEventListener('loadedmetadata', () => { a.playbackRate = P.rate || 1; });   // 换文件后速度会被重置
   a.addEventListener('ended', () => { if (P.i >= 0 && P.i + 1 < P.segs.length) plAt(P.segs[P.i + 1].t0); else plShow(); });   // 一段播完接下一段
   $('#plBtn').onclick = () => { if (!P.segs.length) return; if (P.i < 0){ plUnlock(); plAt(+$('#plBar').value || 0); } else if (a.paused) a.play().catch(e => toast(e.message)); else a.pause(); };
-  $('#plBar').oninput = () => { P.seeking = true; $('#plTime').textContent = fmtT(+$('#plBar').value) + ' / ' + fmtT(P.total); };
+  // 拖进度条：手指还没松开，字幕就跟着跳到那句
+  $('#plBar').oninput = () => {
+    P.seeking = true; const t = +$('#plBar').value;
+    $('#plTime').textContent = fmtT(t) + ' / ' + fmtT(P.total);
+    if (!HL.follow) hlFollow(true);
+    plHL(t, true);
+  };
   $('#plBar').onchange = () => { P.seeking = false; const play = P.i < 0 || !a.paused; if (play) plUnlock(); plAt(+$('#plBar').value, play); };
+  $('#plBack').onclick = () => { if (!P.segs.length) return; const play = P.i < 0 || !a.paused; if (play) plUnlock(); hlFollow(true); plAt(Math.max(0, plCur() - 5), play); };
+  // 播放速度：1 → 1.25 → 1.5 → 0.75 → 1，记住上次选的
+  const RATES = [1, 1.25, 1.5, 0.75];
+  const setRate = r => { P.rate = r; a.defaultPlaybackRate = r; a.playbackRate = r; $('#plRate').textContent = r + '×'; lsSet('lt.rate', r); };
+  setRate(RATES.includes(+lsGet('lt.rate', 1)) ? +lsGet('lt.rate', 1) : 1);
+  $('#plRate').onclick = () => setRate(RATES[(RATES.indexOf(P.rate) + 1) % RATES.length]);
+  $('#plFollow').onclick = () => hlFollow(true);
+  // 自己用手指/滚轮翻字幕：先不自动跟
+  const body = $('#pSession .body');
+  const off = () => { if (HL.follow && !a.paused) hlFollow(false); };
+  body.addEventListener('touchmove', off, {passive:true});
+  body.addEventListener('wheel', off, {passive:true});
+  // 电脑上空格键 播放/暂停
+  document.addEventListener('keydown', e => {
+    if (e.code !== 'Space' || !$('#pSession').classList.contains('show') || /INPUT|TEXTAREA|BUTTON/.test(document.activeElement.tagName) && document.activeElement.id !== 'plBar') return;
+    e.preventDefault(); $('#plBtn').click();
+  });
 })();
 
 let curSess = null;
@@ -1917,6 +2092,11 @@ async function openSession(id){
   if (!segs.length){   // 老格式
     const chunks = await DB.getChunks(id);
     if (chunks.length) segs = [{idx:0, t0:0, dur:curSess.duration || 0, mime:(curSess.mime || 'audio/mp4').split(';')[0], blob:new Blob(chunks, {type:(curSess.mime || 'audio/mp4').split(';')[0]})}];
+  } else if (segs.length > 1 && segs.every(g => g.cont)){
+    // MP3 方式录的还没合成的几段：当成一个文件播，中间不停顿
+    segs.sort((a, b) => a.t0 - b.t0);
+    const last = segs[segs.length - 1];
+    segs = [{idx:-1, t0:segs[0].t0, dur:last.t0 + last.dur - segs[0].t0, mime:'audio/mpeg', parts:segs}];
   }
   Object.assign(P, {sess:curSess, segs, total:segs.length ? Math.max(curSess.duration || 0, segs[segs.length - 1].t0 + segs[segs.length - 1].dur) : 0});
   $('#plBar').max = P.total || 1; $('#plBar').value = 0;
@@ -1924,7 +2104,7 @@ async function openSession(id){
   resetExportBtn();
   plShow();
   const ownHere = !curSess.device || curSess.device === DEVICE_ID;
-  $('#sessHint').textContent = segs.length ? '点任意一句，录音跳到那里播放。' + (ownHere ? '' : '录音在云端，第一次播放要下载。')
+  $('#sessHint').textContent = segs.length ? '点任意一个词，录音从那里开始播。' + (ownHere ? '' : '录音在云端，第一次播放要下载。')
     : (ownHere ? '这节没有录音。' : '这节在另一台设备上录的，那台设备还没把录音传上云端。');
   P.view = 'refined';
   renderSessLines(); refineShow();
@@ -1935,14 +2115,18 @@ function renderSessLines(){
   if (!curSess) return;
   const lines = P.view === 'live' && curSess.liveLines ? curSess.liveLines : (curSess.lines || []);
   const box = $('#sessLines');
-  box.innerHTML = lines.map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}${spkTag(l.spk)}</div><div class="en">${enMarkup(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
-  box.querySelectorAll('.line').forEach(el => el.onclick = () => {
-    if (!P.segs.length) return;
-    const l = lines[+el.dataset.i];
-    box.querySelectorAll('.playing').forEach(x => x.classList.remove('playing')); el.classList.add('playing');
-    plUnlock();
-    plAt(Math.max(0, l.t - 0.3));
-  });
+  box.innerHTML = lines.map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}${spkTag(l.spk)}</div><div class="en">${enWordsHtml(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
+  Object.assign(HL, {lines, times:[], els:[...box.querySelectorAll('.line')], li:-1, wi:-1});
+  if (P.i >= 0) plHL(plCur(), true);   // 精修中途重画了，高亮接着
+  // 点一个词：从这个词开始播；点这句的别处：从句首播
+  box.onclick = e => {
+    const el = e.target.closest('.line'); if (!el || !P.segs.length) return;
+    const i = +el.dataset.i, w = e.target.closest('.w');
+    let t = lines[i].t - 0.3;
+    if (w){ const ts = HL.times[i] || (HL.times[i] = wordTimes(lines[i], (lines[i + 1] || {}).t)); t = (ts[+w.dataset.k] ?? lines[i].t) - 0.15; }
+    plUnlock(); hlFollow(true);
+    plAt(Math.max(0, t));
+  };
 }
 $('#btnRename').onclick = async () => {
   if (!curSess) return;
@@ -2106,6 +2290,7 @@ window.addEventListener('beforeunload', e => { if (L.state !== 'idle'){ e.preven
 loadSettings(); lastSyncPart = syncPart(); applyDisplay();
 $('#togSave').checked = S.saveDefault;
 updateButtons();
+setTimeout(() => loadLame().catch(() => {}), 2000);   // 录音要用的 MP3 压缩库先备好，点开始时不用等
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 DB.allSessions().then(async list => {
   // 本机上次意外中断的标记一下（别的设备正在录的不管）
