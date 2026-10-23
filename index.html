@@ -158,7 +158,7 @@ a{color:#7fb7ff}
         <button id="btnCloudSync" style="display:none">立即同步</button>
         <button id="btnCloudOff" style="display:none">关闭同步</button>
       </div>
-      <div class="hint">同步 API key、识别和翻译设置、术语表、历史记录的文字。录音不同步，只在录制的那台设备上。字号等显示设置每台设备各自保存。数据存在你 Drive 的应用隐藏文件夹里，只有本网页能读。</div>
+      <div class="hint">录音和文字记录放在 Google Drive 的"课堂同传"文件夹里，每节课一个子文件夹，在电脑上打开 Drive 就能直接听、下载。在这里删一节课，那个文件夹会进 Drive 回收站。API key、术语表等设置和同步用的数据存在 Drive 隐藏的应用数据里，别人看不到。字号等显示设置每台设备各自保存。</div>
     </div>
 
     <div class="sec">
@@ -1119,6 +1119,8 @@ const Cloud = {
   busy:false, again:false, timer:null, msg:'',
   save(){ lsSet('lt.cloud', this.st); lsSet('lt.synced', [...this.synced]); lsSet('lt.cloudDel', this.del); },
   ready(){ return !!(this.st.on && this.st.token && this.st.exp > Date.now()); },
+  // 新版要"看得见的文件夹"（drive.file）权限，老登录只有隐藏数据的权限，要重新授权一次
+  hasScopes(){ return (this.st.scope || '').includes('drive.file'); },
   redirectUri(){ return location.origin + location.pathname.replace(/index\.html$/, ''); },
 
   login(silent){
@@ -1126,7 +1128,7 @@ const Cloud = {
     const state = Math.random().toString(36).slice(2);
     lsSet('lt.oauth', {state, silent:!!silent});
     const p = new URLSearchParams({client_id:GOOGLE_CLIENT_ID, redirect_uri:this.redirectUri(), response_type:'token',
-      scope:'https://www.googleapis.com/auth/drive.appdata email', state, include_granted_scopes:'true'});
+      scope:'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file email', state, include_granted_scopes:'true'});
     if (silent){ p.set('prompt', 'none'); if (this.st.email) p.set('login_hint', this.st.email); }
     else p.set('prompt', 'consent');   // 每次都显示授权页，上次没勾的 Drive 权限可以补勾
     location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + p;
@@ -1138,13 +1140,14 @@ const Cloud = {
     history.replaceState(null, '', location.pathname + location.search);
     const o = lsGet('lt.oauth', {}); localStorage.removeItem('lt.oauth');
     if (!o.state || h.get('state') !== o.state) return;
-    if (h.get('access_token') && !(h.get('scope') || '').includes('drive.appdata')){
-      // 授权页上 Drive 那一项没勾
+    const scope = h.get('scope') || '';
+    if (h.get('access_token') && !(scope.includes('drive.appdata') && scope.includes('drive.file'))){
+      // 授权页上 Drive 那几项没全勾
       Object.assign(this.st, {on:true, token:''}); this.save();
-      this.msg = '授权时没勾选 Google Drive 那一项。点"立即同步"重新登录，在授权页把 Drive 那一项也勾上。';
+      this.msg = '授权时 Google Drive 那几项没全勾。点"立即同步"重新登录，在授权页把 Drive 相关的都勾上。';
       toast(this.msg, 8000);
     } else if (h.get('access_token')){
-      Object.assign(this.st, {on:true, token:h.get('access_token'), exp:Date.now() + (+h.get('expires_in') - 120) * 1000});
+      Object.assign(this.st, {on:true, token:h.get('access_token'), scope, exp:Date.now() + (+h.get('expires_in') - 120) * 1000});
       try {
         const r = await fetchT('https://oauth2.googleapis.com/tokeninfo?access_token=' + encodeURIComponent(this.st.token), {});
         if (r.ok){ const j = await r.json(); if (j.email) this.st.email = j.email; }
@@ -1183,19 +1186,51 @@ const Cloud = {
     return files;
   },
   async download(id){ return (await this.api('GET', `https://www.googleapis.com/drive/v3/files/${id}?alt=media`)).json(); },
-  // 录音文件：audio-<课id>-<段号>
+  /* 看得见的文件：我的云端硬盘/课堂同传/<课名>/录音 01.m4a、文字记录.txt
+     每个文件夹和文件都带 appProperties（lt=类型，sid=课的 id），改名、挪位置也找得到。
+     设置（有 API key）和同步用的数据还放在隐藏的应用数据里 */
+  FOLDER:'application/vnd.google-apps.folder',
+  async q(query){
+    let files = [], page = '';
+    do {
+      const r = await this.api('GET', 'https://www.googleapis.com/drive/v3/files?spaces=drive&pageSize=1000&fields=nextPageToken,files(id,name,appProperties)&q='
+        + encodeURIComponent('(' + query + ') and trashed=false') + (page ? '&pageToken=' + page : ''));
+      const j = await r.json(); files = files.concat(j.files || []); page = j.nextPageToken || '';
+    } while (page);
+    return files;
+  },
+  async createMeta(meta){
+    const r = await this.api('POST', 'https://www.googleapis.com/drive/v3/files?fields=id', {headers:{'Content-Type':'application/json'}, body:JSON.stringify(meta)});
+    return (await r.json()).id;
+  },
+  patchMeta(id, meta){ return this.api('PATCH', 'https://www.googleapis.com/drive/v3/files/' + id, {headers:{'Content-Type':'application/json'}, body:JSON.stringify(meta)}); },
+  // 上传文件（有 id 就是覆盖内容）
+  async uploadFile(meta, blob, id){
+    if (id){ meta = Object.assign({}, meta); delete meta.parents; }
+    const b = 'lt' + Math.random().toString(36).slice(2);
+    const body = new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${blob.type || 'application/octet-stream'}\r\n\r\n`, blob, `\r\n--${b}--`]);
+    const r = await this.api(id ? 'PATCH' : 'POST', 'https://www.googleapis.com/upload/drive/v3/files' + (id ? '/' + id : '') + '?uploadType=multipart&fields=id',
+      {headers:{'Content-Type':'multipart/related; boundary=' + b}, body}, 120000);
+    return (await r.json()).id;
+  },
+  async rootFolder(){
+    if (this.rootId) return this.rootId;
+    const f = (await this.q("appProperties has {key='lt' and value='root'}"))[0];
+    this.rootId = f ? f.id : await this.createMeta({name:'课堂同传', mimeType:this.FOLDER, appProperties:{lt:'root'}});
+    return this.rootId;
+  },
+  // 录音在哪：先找看得见的文件夹里的，再找隐藏数据里的老文件（audio-<课id>-<段号>，还没搬过去的）
   audioName:(sid, idx) => `audio-${sid}-${idx}`,
   async audioId(sid, idx){
-    const name = this.audioName(sid, idx);
-    if (!this.ids || !this.ids.has(name)) this.ids = new Map((await this.list()).map(f => [f.name, f.id]));
+    const key = sid + '-' + idx, name = this.audioName(sid, idx);
+    if (this.audio && this.audio.has(key)) return this.audio.get(key);
+    if (this.ids && this.ids.has(name)) return this.ids.get(name);
+    if (this.hasScopes()){
+      const hit = (await this.q(`appProperties has {key='sid' and value='${sid}'} and appProperties has {key='idx' and value='${idx}'}`))[0];
+      if (hit){ (this.audio = this.audio || new Map()).set(key, hit.id); return hit.id; }
+    }
+    this.ids = new Map((await this.list()).map(f => [f.name, f.id]));
     return this.ids.get(name);
-  },
-  async uploadBlob(name, blob){
-    const b = 'lt' + Math.random().toString(36).slice(2);
-    const meta = {name, parents:['appDataFolder']};
-    const body = new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${blob.type || 'application/octet-stream'}\r\n\r\n`, blob, `\r\n--${b}--`]);
-    const r = await this.api('POST', 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {headers:{'Content-Type':'multipart/related; boundary=' + b}, body}, 120000);
-    return (await r.json()).id;
   },
   async upload(id, name, data, updatedAt){
     const meta = {appProperties:{u:String(updatedAt || 0)}};
@@ -1250,11 +1285,16 @@ const Cloud = {
       await this.upload(sf && sf.id, 'settings.json', Object.fromEntries(SYNC_KEYS.map(k => [k, S[k]])), S.updatedAt);
     }
 
-    // 本机删掉的，云端也删（文字和录音）
+    // 本机删掉的，云端也删：隐藏的同步数据直接删；看得见的文件夹放进 Drive 回收站（还能找回来）
     for (const id of this.del.slice()){
       for (const f of [...byName.values()].filter(f => f.name === 'session-' + id + '.json' || f.name.startsWith('audio-' + id + '-'))){
         try { await this.api('DELETE', 'https://www.googleapis.com/drive/v3/files/' + f.id); } catch(e){ if (e.status !== 404) throw e; }
         byName.delete(f.name);
+      }
+      if (this.hasScopes()){
+        for (const f of await this.q(`appProperties has {key='sid' and value='${id}'}`)){
+          try { await this.patchMeta(f.id, {trashed:true}); } catch(e){ if (e.status !== 404) throw e; }
+        }
       }
       this.del = this.del.filter(x => x !== id); this.synced.delete(id); this.save();
     }
@@ -1286,24 +1326,75 @@ const Cloud = {
     }
     this.save();
 
-    // 录音：下课后再传（上课时不占网络，免得实时识别卡住）；传上去的，本机超过保留天数就删（要听时再从云端下载）
+    // 录音和文字记录：下课后再传（上课时不占网络，免得实时识别卡住）
     if (changed && $('#pHistory').classList.contains('show')) renderHistory();
     if (L.state !== 'idle') return;
+    if (!this.hasScopes()){   // 老登录没有"看得见的文件夹"权限：录音先留在本机，等重新授权
+      this.needScope = true;
+      return;
+    }
+    this.needScope = false; this.rootId = null;
     const sessNow = new Map(((await DB.allSessions()) || []).map(s => [s.id, s]));
+    const vis = await this.q("appProperties has {key='lt' and value='folder'} or appProperties has {key='lt' and value='audio'} or appProperties has {key='lt' and value='txt'}");
+    const folders = new Map(), txts = new Map();
+    this.audio = new Map();
+    for (const f of vis){
+      const p = f.appProperties || {};
+      if (p.lt === 'folder') folders.set(p.sid, f);
+      else if (p.lt === 'txt') txts.set(p.sid, f);
+      else if (p.lt === 'audio') this.audio.set(p.sid + '-' + p.idx, f.id);
+    }
+    // 每节课一个文件夹，名字跟着课名走（只由录这节课的设备管，免得两台设备各建一个）
+    const mine = s => !s.device || s.device === DEVICE_ID;
+    const folderOf = async s => {
+      let f = folders.get(s.id);
+      if (!f){
+        f = {id:await this.createMeta({name:s.title, mimeType:this.FOLDER, parents:[await this.rootFolder()], appProperties:{lt:'folder', sid:s.id}}), name:s.title};
+        folders.set(s.id, f);
+      } else if (f.name !== s.title){ await this.patchMeta(f.id, {name:s.title}); f.name = s.title; }
+      return f.id;
+    };
+    const txtDone = lsGet('lt.txtSync', {});
+    for (const s of sessNow.values()){
+      if (!mine(s) || !((s.lines || []).length || (s.segs || []).length)) continue;
+      const fid = await folderOf(s);
+      if ((txtDone[s.id] || 0) < (s.updatedAt || 0)){
+        const t = txts.get(s.id);
+        await this.uploadFile({name:'文字记录.txt', parents:[fid], appProperties:{lt:'txt', sid:s.id}}, new Blob([sessionText(s)], {type:'text/plain'}), t && t.id);
+        txtDone[s.id] = s.updatedAt || 0; lsSet('lt.txtSync', txtDone);
+      }
+    }
+    const audioMeta = (sid, idx, mime) => ({name:`录音 ${String(idx + 1).padStart(2, '0')}${(mime || '').includes('webm') ? '.webm' : '.m4a'}`, appProperties:{lt:'audio', sid, idx:String(idx)}});
+    // 以前传到隐藏数据里的录音，搬到看得见的文件夹
+    for (const f of byName.values()){
+      const m = f.name.match(/^audio-(.+)-(\d+)$/); if (!m) continue;
+      const [, sid, idxS] = m, idx = +idxS, s = sessNow.get(sid);
+      if (!s || !mine(s)) continue;
+      if (!this.audio.has(sid + '-' + idx)){
+        const seg = (s.segs || []).find(x => x.idx === idx) || {};
+        const got = await (await this.api('GET', `https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, {}, 120000)).blob();
+        const meta = audioMeta(sid, idx, seg.mime); meta.parents = [await folderOf(s)];
+        this.audio.set(sid + '-' + idx, await this.uploadFile(meta, new Blob([got], {type:seg.mime || 'audio/mp4'})));
+        log(`录音已搬到 Drive 文件夹：${s.title} 第${idx + 1}段`);
+      }
+      await this.api('DELETE', 'https://www.googleapis.com/drive/v3/files/' + f.id);
+      this.ids.delete(f.name);
+    }
+    // 本机录的录音：传上去；传上去的，本机超过保留天数就删（要听时再从云端下载）
     const keepMs = Math.max(0, +S.keepDays || 0) * 86400e3;
     for (const r of await DB.allSegs()){
       if (!r.blob) continue;
       const sess = sessNow.get(r.sessionId);
       if (!sess){ await DB.delKey(r.key); continue; }   // 课已经删了
-      const name = this.audioName(r.sessionId, r.idx);
+      const key = r.sessionId + '-' + r.idx;
       if (!r.up){
-        if (!byName.has(name)){
-          const id = await this.uploadBlob(name, r.blob);
-          this.ids.set(name, id);
+        if (!this.audio.has(key)){
+          const meta = audioMeta(r.sessionId, r.idx, r.mime); meta.parents = [await folderOf(sess)];
+          this.audio.set(key, await this.uploadFile(meta, r.blob));
           log(`录音已上传：${sess.title} 第${r.idx + 1}段 ${(r.blob.size / 1048576).toFixed(1)}MB`);
         }
         r.up = true;
-        if (sessNow.has(r.sessionId)) await DB.putSeg(r);
+        await DB.putSeg(r);
       }
       const old = r.cachedAt ? Date.now() - r.cachedAt > 7 * 86400e3 : Date.now() - sess.createdAt > keepMs;
       const playing = P.sess && P.sess.id === r.sessionId;
@@ -1323,12 +1414,13 @@ function renderCloud(){
   let info;
   if (!GOOGLE_CLIENT_ID) info = '还没配置 Google 客户端 ID，暂时不能用。';
   else if (!on) info = '没开启。每台设备各自保存。';
+  else if (Cloud.st.token && !Cloud.hasScopes() && !Cloud.msg) info = '已开启' + (Cloud.st.email ? '：' + Cloud.st.email : '') + '。录音和文字记录要放到 Drive 里看得见的"课堂同传"文件夹，需要重新授权一次：点"立即同步"，在授权页把 Drive 相关的都勾上。没授权前录音先留在本机。';
   else info = '已开启' + (Cloud.st.email ? '：' + Cloud.st.email : '') + '。' + (Cloud.msg || (Cloud.st.lastSync ? '上次同步 ' + new Date(Cloud.st.lastSync).toLocaleString() : ''));
   $('#cloudInfo').textContent = info;
 }
 $('#btnCloudLogin').onclick = () => Cloud.login(false);
 $('#btnCloudSync').onclick = () => {
-  if (Cloud.ready()) return Cloud.sync();
+  if (Cloud.ready() && Cloud.hasScopes()) return Cloud.sync();
   if (L.state !== 'idle'){ toast('正在录，结束后再重新登录'); return; }
   Cloud.login(false);
 };
@@ -1571,7 +1663,7 @@ $('#btnRename').onclick = async () => {
 $('#btnDelete').onclick = async () => {
   if (!curSess) return;
   if (L.session && L.session.id === curSess.id && L.state !== 'idle'){ toast('正在录的这节不能删'); return; }
-  if (!confirm('删除「' + curSess.title + '」的文字和录音？删了找不回来。')) return;
+  if (!confirm('删除「' + curSess.title + '」的文字和录音？' + (Cloud.st.on ? '本机删掉，Drive 里的文件夹会进回收站（30 天内还能在 Drive 回收站找回）。' : '删了找不回来。'))) return;
   await DB.deleteSession(curSess.id);
   if (Cloud.st.on){ Cloud.del.push(curSess.id); Cloud.save(); Cloud.schedule(1000); }
   $('#pSession').classList.remove('show'); renderHistory();
@@ -1584,11 +1676,14 @@ async function shareOrDownload(blob, filename){
   }
   shareDownload(blob, filename);
 }
+// 文字记录（导出和 Drive 文件夹里的"文字记录.txt"用同一个格式）
+function sessionText(s){
+  const head = `${s.title}\n${new Date(s.createdAt).toLocaleString()}  时长 ${fmtT(s.duration || 0)}\n\n`;
+  return head + (s.lines || []).map(l => `[${fmtT(l.t)}] ${l.en}\n${l.zh || ''}\n`).join('\n');
+}
 $('#btnExportTxt').onclick = () => {
   if (!curSess) return;
-  const head = `${curSess.title}\n${new Date(curSess.createdAt).toLocaleString()}  时长 ${fmtT(curSess.duration || 0)}\n\n`;
-  const body = (curSess.lines || []).map(l => `[${fmtT(l.t)}] ${l.en}\n${l.zh}\n`).join('\n');
-  shareOrDownload(new Blob([head + body], {type:'text/plain;charset=utf-8'}), safeName(curSess.title) + '.txt');
+  shareOrDownload(new Blob([sessionText(curSess)], {type:'text/plain;charset=utf-8'}), safeName(curSess.title) + '.txt');
 };
 $('#btnExportAudio').onclick = async () => {
   if (!curSess || !P.segs.length) return;
