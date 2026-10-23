@@ -62,6 +62,7 @@ a{color:#7fb7ff}
 #btnEnd{background:var(--danger);color:#fff}
 #btnPause{background:var(--warn);color:#111}
 .spacer{flex:1}
+#bottom .mic{font-size:14px;padding:10px 12px;border-radius:12px;color:var(--muted)}
 .tog{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:14px;user-select:none}
 .tog input{width:20px;height:20px}
 
@@ -93,7 +94,8 @@ a{color:#7fb7ff}
 .sess .meta{color:var(--muted);font-size:12px;margin-top:3px}
 .pl{display:flex;align-items:center;gap:8px;margin:-14px -16px 10px;background:var(--panel);border-bottom:1px solid var(--line);padding:8px 12px;position:-webkit-sticky;position:sticky;top:-14px;z-index:3}
 .pl button{width:44px;height:40px;padding:0;font-size:18px;flex:none}
-.pl #plBack,.pl #plRate{font-size:14px}
+.pl #plBack,.pl #plRate,.pl #plBoost{font-size:14px}
+@media (max-width:480px){ .pl{flex-wrap:wrap;row-gap:6px} .pl input#plBar{order:9;flex:1 1 100%} .pl button{width:40px;height:36px} #plTime{flex:1} }
 .pl #plFollow{width:auto;padding:0 10px;font-size:13px;background:#2d6b4a;color:#fff}
 #sessLines .line.cur{background:#1b222b;box-shadow:inset 3px 0 0 var(--accent)}
 #sessLines .line.cur.wt .w{color:var(--muted)}
@@ -123,6 +125,7 @@ a{color:#7fb7ff}
   <button id="btnStart" class="big">开始</button>
   <button id="btnPause" class="big" style="display:none">暂停</button>
   <button id="btnEnd" class="big" style="display:none">结束</button>
+  <button id="btnMic" class="mic" aria-label="收音模式">全场</button>
   <span class="spacer"></span>
   <label class="tog"><input type="checkbox" id="togSave">保存</label>
   <label class="tog"><input type="checkbox" id="togZh">中文</label>
@@ -144,6 +147,7 @@ a{color:#7fb7ff}
       <input type="range" id="plBar" min="0" max="1" step="0.1" value="0">
       <span id="plTime"></span>
       <button id="plRate" aria-label="播放速度">1×</button>
+      <button id="plBoost" aria-label="音量放大">🔈</button>
       <button id="plFollow" style="display:none">回到当前</button>
     </div>
     <audio id="player" preload="auto"></audio>
@@ -195,9 +199,10 @@ a{color:#7fb7ff}
         <option value="whisper">按句（Groq Whisper）</option>
       </select></div>
       <div class="row"><label>收音</label><select id="micMode">
-        <option value="room">全场：学生发言、讨论也收（关掉 iPad 降噪）</option>
-        <option value="near">只听近处的人：降噪，背景人声会被压掉</option>
+        <option value="room">全场：手机放在自己座位上用（远处的人声、提问、讨论都收，网页自动放大）</option>
+        <option value="near">近处（通话模式）：手机放在老师旁边用（系统放大、降噪，突出离手机最近的人）</option>
       </select></div>
+      <div class="hint" style="margin:-4px 0 10px">每台设备各自记住，不跟云同步。主界面"开始"旁边也能切换。</div>
       <div class="row"><label>区分说话人</label><input type="checkbox" id="diarize" style="width:20px;height:20px"><span class="hint">实时字幕换人时另起一行，标"说话人 1/2…"（只对实时识别有效）</span></div>
       <div class="row"><label>Deepgram 模型</label><input type="text" id="dgModel"></div>
       <div class="row"><label>Whisper 模型</label><input type="text" id="asrModel"></div>
@@ -325,8 +330,8 @@ function loadSettings(){
   S.enabled = Object.assign({}, DEFAULTS.enabled, saved.enabled || {});
   S.models = Object.assign({}, saved.models || {});
 }
-// 这些跟着账号走，云同步；字号、中文亮度等显示设置每台设备各自保存
-const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'micMode', 'diarize', 'models', 'enabled', 'glossary', 'sensitivity'];
+// 这些跟着账号走，云同步；字号、中文亮度等显示设置、收音模式（每台设备放的位置不一样）每台设备各自保存
+const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'diarize', 'models', 'enabled', 'glossary', 'sensitivity'];
 const syncPart = () => JSON.stringify(SYNC_KEYS.map(k => S[k]));
 let lastSyncPart = '';
 function saveSettings(){
@@ -673,7 +678,7 @@ function capWindowReset(){
   monReset();
 }
 // 每分钟的概况：收到多少声音、多少秒全是 0、多少秒明显有声音、Deepgram 回了几个词
-function monReset(){ L.mon = {t0:realNow(), at:performance.now(), sec:0, zero:0, loud:0, sq:0, n:0, words:0}; }
+function monReset(){ L.mon = {t0:realNow(), at:performance.now(), sec:0, zero:0, loud:0, sq:0, n:0, words:0, g:0, gn:0}; }
 
 async function buildCapture(i){
   const m = CAP_MODES[i], AC = window.AudioContext || window.webkitAudioContext;
@@ -775,10 +780,12 @@ function capTick(){
   const M = L.mon, span = realNow() - M.t0;
   if (span >= 60){
     const got = M.sec / ((now - M.at) / 1000), db = M.n ? 10 * Math.log10(M.sq / M.n + 1e-12) : -120;
-    const bad = M.zero > 2 || got < 0.9 || (L.engine === 'dg' && M.loud > 20 && M.words < 5);
+    const gdb = M.gn ? 20 * Math.log10(M.g / M.gn) : 0;
+    const quiet = db + gdb < -40;   // 放大到头了还是很小：麦克风被挡住、离得太远
+    const bad = M.zero > 2 || got < 0.9 || quiet || (L.engine === 'dg' && M.loud > 20 && M.words < 5);
     L.monCount = (L.monCount || 0) + 1;
     if (bad || L.monCount % 5 === 0)
-      log(`${bad ? '⚠ ' : ''}最近 ${Math.round(span)} 秒：收到 ${Math.round(got * 100)}% 的声音，平均音量 ${Math.round(db)}dB，${Math.round(M.zero)} 秒全是静音，${Math.round(M.loud)} 秒明显有声音` + (L.engine === 'dg' ? `，Deepgram 回了 ${M.words} 个词` : ''));
+      log(`${bad ? '⚠ ' : ''}最近 ${Math.round(span)} 秒：收到 ${Math.round(got * 100)}% 的声音，原始音量 ${Math.round(db)}dB，自动放大 +${Math.round(gdb)}dB${quiet ? '（放大后还是太小）' : ''}，${Math.round(M.zero)} 秒全是静音，${Math.round(M.loud)} 秒明显有声音` + (L.engine === 'dg' ? `，Deepgram 回了 ${M.words} 个词` : ''));
     monReset();
   }
 }
@@ -791,16 +798,17 @@ async function start(){
   try {
     // 全场：关掉 iPad 的降噪和自动增益（它们是给打电话设计的，会把离得远的人声当噪声压掉）
     const room = S.micMode !== 'near';
-    L.gum = {audio:{echoCancellation:false, noiseSuppression:!room, autoGainControl:!room, channelCount:1}};
+    // 只听近处 = 手机的通话模式（自动放大、降噪、突出离手机最近的人）；iPhone 上要连"消回声"一起开，自动放大才生效
+    L.gum = {audio:{echoCancellation:!room, noiseSuppression:!room, autoGainControl:!room, channelCount:1}};
     stream = await navigator.mediaDevices.getUserMedia(L.gum);
   } catch(e){ toast('拿不到麦克风权限：' + e.message); return; }
   const track = stream.getAudioTracks()[0];
   const ts = (track && track.getSettings && track.getSettings()) || {};
   log(`麦克风：${track ? track.label || '默认' : '?'}，采样率 ${ts.sampleRate || '未知'}，${ts.channelCount || '?'} 声道，`
-    + `${S.micMode !== 'near' ? '全场' : '只听近处'}（降噪${ts.noiseSuppression === undefined ? '?' : ts.noiseSuppression ? '开' : '关'}，自动增益${ts.autoGainControl === undefined ? '?' : ts.autoGainControl ? '开' : '关'}）`);
+    + `${S.micMode !== 'near' ? '全场' : '近处（通话模式）'}（消回声${ts.echoCancellation === undefined ? '?' : ts.echoCancellation ? '开' : '关'}，降噪${ts.noiseSuppression === undefined ? '?' : ts.noiseSuppression ? '开' : '关'}，自动增益${ts.autoGainControl === undefined ? '?' : ts.autoGainControl ? '开' : '关'}）`);
 
   Object.assign(L, {stream, ctx:null, micRate:ts.sampleRate || 0, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false,
-    wall0:0, pausedMs:0, pausedAt:0, capRatios:{}, capFinal:false});
+    wall0:0, pausedMs:0, pausedAt:0, capRatios:{}, capFinal:false, agc:{g:1, h:[], n:0}});
   let ok = false;
   for (let i = 0; i < CAP_MODES.length && !ok; i++){ ok = await buildCapture(i); if (!ok) L.capRatios[i] = -1; }
   if (!ok){ toast('音频处理启动失败，换个浏览器试试'); stream.getTracks().forEach(t => t.stop()); return; }
@@ -1164,15 +1172,45 @@ function toPcm16(f, rate){
   return out.buffer;
 }
 
+/* 自动音量：有的设备（比如 iPhone 关掉通话模式时）给网页的声音只有正常的 1/20，Deepgram 认出开头两句就不出字了。
+   按最近 10 秒里说话时的音量（第 90 百分位）把声音调到 -20dB 左右，最多放大 30 倍；
+   倍数慢慢变，听不出忽大忽小；只在像有人说话时才调，安静时不动，免得把底噪越放越响；太响时马上降，再加一道防破音 */
+const AGC_MAX = 30;
+function agcGain(rms){
+  const A = L.agc; A.h.push(rms); if (A.h.length > 120) A.h.shift();
+  if (A.h.length >= 12){
+    const s = A.h.slice().sort((a, b) => a - b), floor = s[Math.floor(s.length * 0.2)], loud = s[Math.floor(s.length * 0.9)];
+    if (rms > floor * 2 && rms > 2e-4){
+      const want = Math.min(AGC_MAX, Math.max(1, 0.08 / loud));
+      A.g += (want - A.g) * (A.n++ < 40 ? 0.3 : 0.04);   // 刚开始几秒调得快，之后慢慢跟
+    }
+  }
+  if (rms * A.g > 0.35) A.g = Math.max(1, 0.35 / rms);
+  return A.g;
+}
+function agcApply(f, g){
+  if (g < 1.05) return f;
+  const out = new Float32Array(f.length);
+  for (let i = 0; i < f.length; i++){
+    let y = f[i] * g;
+    if (y > 0.9) y = 0.9 + 0.1 * Math.tanh((y - 0.9) / 0.1); else if (y < -0.9) y = -0.9 - 0.1 * Math.tanh((-y - 0.9) / 0.1);
+    out[i] = y;
+  }
+  return out;
+}
+
 /* VAD + segmenting（按句识别用） */
 function onFrame(f){
   if (L.state !== 'running') return;
   const n = f.length, t = Math.max(0, realNow() - n / L.rate);   // 这一块声音开始的课堂时间
   L.frames += n; L.capFrames += n; L.diagFrames += n;
   let sum = 0, peak = 0; for (let i = 0; i < n; i++){ const v = f[i]; sum += v * v; if (v > peak) peak = v; else if (-v > peak) peak = -v; }
-  const rms = Math.sqrt(sum / n), M = L.mon, fd = n / L.rate;
+  const raw = Math.sqrt(sum / n), M = L.mon, fd = n / L.rate;
   M.sec += fd; M.sq += sum; M.n += n;
   if (peak < 1e-5){ M.zero += fd; L.zeroRun += fd; } else L.zeroRun = 0;   // 一点声音都没有（真安静也会有底噪，不会是 0）
+  // 自动音量：后面识别、录音、音量条用的都是放大后的声音
+  const g = agcGain(raw), rms = raw * g;
+  f = agcApply(f, g); M.g += g; M.gn++;
   if (rms > 0.015){ M.loud += fd; L.loudNoWord += fd; }
   $('#level i').style.width = Math.min(100, rms * 900) + '%';
   if (L.mp3) mp3Push(f, t);
@@ -1731,6 +1769,7 @@ function updateButtons(){
   $('#btnEnd').style.display = st === 'idle' ? 'none' : '';
   $('#btnPause').textContent = st === 'paused' ? '继续' : '暂停';
   $('#togSave').disabled = st !== 'idle';
+  $('#btnMic').style.display = st === 'idle' ? '' : 'none';   // 收音模式点"开始"时才生效，上课中不显示
   if (st === 'idle') $('#clock').textContent = '00:00';
 }
 
@@ -2198,6 +2237,24 @@ async function plAt(t, play = true){
   setRate(RATES.includes(+lsGet('lt.rate', 1)) ? +lsGet('lt.rate', 1) : 1);
   $('#plRate').onclick = () => setRate(RATES[(RATES.indexOf(P.rate) + 1) % RATES.length]);
   $('#plFollow').onclick = () => hlFollow(true);
+  // 音量放大：老的小声录音（比如 iPhone 没开自动音量时录的）听不清时点。
+  // 要经过网页的音频处理，iPhone 开着静音键时会没声音，所以默认不开，点了才接上
+  const BOOST = [1, 4, 10];
+  $('#plBoost').onclick = () => {
+    try {
+      if (!P.boost){
+        const ac = new (window.AudioContext || window.webkitAudioContext)();
+        const src = ac.createMediaElementSource(a), gn = ac.createGain(), lim = ac.createDynamicsCompressor();
+        lim.threshold.value = -6; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.003; lim.release.value = 0.2;
+        src.connect(gn); gn.connect(lim); lim.connect(ac.destination);
+        P.boost = {ac, gn, i:0};
+      }
+      const b = P.boost; b.ac.resume();
+      b.i = (b.i + 1) % BOOST.length; b.gn.gain.value = BOOST[b.i];
+      $('#plBoost').textContent = b.i ? '🔊×' + BOOST[b.i] : '🔈';
+      toast(b.i ? `音量放大 ${BOOST[b.i]} 倍` + (b.i === 1 ? '，还小就再点一下' : '') : '音量放大已关', 2500);
+    } catch(e){ toast('这个浏览器不支持放大：' + e.message); log('播放放大：' + e.message); }
+  };
   // 自己用手指/滚轮翻字幕：先不自动跟
   const body = $('#pSession .body');
   const off = () => { if (HL.follow && !a.paused) hlFollow(false); };
@@ -2350,7 +2407,11 @@ function fillSettings(){
 }
 const bindKey = (sel, k) => $(sel).onchange = () => { S.keys[k] = $(sel).value.trim(); Object.keys(cooldown).forEach(x => cooldown[x] = 0); saveSettings(); };
 bindKey('#kDg', 'dg'); bindKey('#kGroq', 'groq'); bindKey('#kGemini', 'gemini'); bindKey('#kSf', 'sf');
-$('#micMode').onchange = () => { S.micMode = $('#micMode').value; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
+const setMicMode = m => { S.micMode = m; saveSettings(); showMicMode(); if (L.state !== 'idle') toast('下次点"开始"时生效'); };
+function showMicMode(){ $('#btnMic').textContent = S.micMode === 'near' ? '近处' : '全场'; $('#micMode').value = S.micMode; }
+$('#micMode').onchange = () => setMicMode($('#micMode').value);
+// 主界面的小开关：全场（手机在自己座位上）↔ 近处（手机在老师旁边，通话模式）
+$('#btnMic').onclick = () => { setMicMode(S.micMode === 'near' ? 'room' : 'near'); toast(S.micMode === 'near' ? '近处（通话模式）：手机放在老师旁边时用' : '全场：手机放在自己座位上时用', 3000); };
 $('#diarize').onchange = () => { S.diarize = $('#diarize').checked; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
 $('#asrEngine').onchange =() => { S.asrEngine = $('#asrEngine').value; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
 $('#keepDays').onchange = () => { const v = Math.round(+$('#keepDays').value); S.keepDays = isFinite(v) && v >= 0 ? v : 30; $('#keepDays').value = S.keepDays; saveSettings(); Cloud.schedule(1000); };
@@ -2416,6 +2477,7 @@ window.addEventListener('beforeunload', e => { if (L.state !== 'idle'){ e.preven
 /* init */
 loadSettings(); lastSyncPart = syncPart(); applyDisplay();
 $('#togSave').checked = S.saveDefault;
+showMicMode();
 updateButtons();
 setTimeout(() => loadLame().catch(() => {}), 2000);   // 录音要用的 MP3 压缩库先备好，点开始时不用等
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});

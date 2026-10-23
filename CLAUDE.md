@@ -51,7 +51,8 @@
 
 - **采音默认用 ScriptProcessor（"通用方式"）**。iPad Safari 上 AudioWorklet（"独立线程方式"）实测只收到 75% 的声音，导致漏词、时间对不上。开始 15 秒后检查，低于 93% 才换下一种（`CAP_MODES` 顺序）
 - **时间轴一律用 `realNow()`**（真实时间减暂停），不要用收到的采样数算；Deepgram 返回的时间用 `DG.realT()` 查表换成课堂时间
-- **收音"全场"模式**关掉 iPad 的 noiseSuppression 和 autoGainControl（它们会把远处的人声当噪声压掉，像"锁定主讲人"）；"只听近处"打开
+- **收音"全场"模式**关掉 echoCancellation、noiseSuppression、autoGainControl（通话处理会把远处的人声当噪声压掉，像"锁定主讲人"）；"近处（通话模式）"三个都打开（iPhone 上 AGC 要和 echoCancellation 一起开才生效）。`micMode` 每台设备各自存、不云同步；主界面"开始"旁边有切换按钮
+- **自动音量**（`agcGain` `agcApply`）：iPhone 关掉通话模式时给网页的声音只有 -55dB，Deepgram 实时认出开头两句就不出字了（录音里其实一直有清楚的人声）。按最近 10 秒说话音量的第 90 百分位调到约 -22dB，最多 ×30，只在像说话时调，太响马上降 + 软限幅；识别、录音、音量条都用放大后的声音。回放有"🔈"按钮 ×4/×10（经 Web Audio，iPhone 静音键开着时会没声，所以默认不接）
 - **Deepgram 实时**：10 秒没回应 / 网络积压 / 连接超时都重连，并重发还没定稿的声音；只在句号问号叹号（≥4 词）或 40 词时断行；定稿删掉的词留成存疑 `⟦…⟧`（淡色显示、不送翻译、导出写成 `(xx?)`）；`diarize` 换人另起一行
 - **录音默认 MP3 方式**（`mp3Start` `mp3Push` `mp3Cut`）：采音拿到的声音当场用 lamejs 压成 MP3，一条连续的流，每 60 秒存一段（`cont:true`），段首尾直接拼接就是完整文件、没有接缝；少收的声音按 `realNow()` 补静音。lamejs 加载不了才退回下面的 MediaRecorder 方式（MediaRecorder 分段在合并处有明显断点，这是改掉它的原因）
 - **回放**：句子/逐词高亮跟着播放（`HL` `plHL`），逐词时间存在行的 `ws` 里（实时和 Deepgram 精修有；老记录和 Whisper 按词长估算）；播放器在顶部固定
