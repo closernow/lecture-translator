@@ -96,9 +96,9 @@ a{color:#7fb7ff}
 .pl #plBack,.pl #plRate{font-size:14px}
 .pl #plFollow{width:auto;padding:0 10px;font-size:13px;background:#2d6b4a;color:#fff}
 #sessLines .line.cur{background:#1b222b;box-shadow:inset 3px 0 0 var(--accent)}
-#sessLines .line.cur .w{color:var(--muted)}
-#sessLines .line.cur .w.done{color:var(--text)}
-#sessLines .line.cur .w.now{background:#2a4a6b;color:#fff;border-radius:4px;box-shadow:0 0 0 2px #2a4a6b}
+#sessLines .line.cur.wt .w{color:var(--muted)}
+#sessLines .line.cur.wt .w.done{color:var(--text)}
+#sessLines .line.cur.wt .w.now{background:#2a4a6b;color:#fff;border-radius:4px;box-shadow:0 0 0 2px #2a4a6b}
 .pl input{flex:1;min-width:0}
 #plTime{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 
@@ -241,7 +241,8 @@ a{color:#7fb7ff}
 
     <div class="sec">
       <h3>运行日志</h3>
-      <div class="hint">最新的在最上面。卡住或出错时截图这里。</div>
+      <div class="hint">最新的在最上面。出问题时点"复制全部日志"，粘贴发出来。</div>
+      <button id="btnCopyLog" style="margin-top:8px">复制全部日志</button>
       <pre id="logBox" style="white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.5;color:var(--muted);max-height:50vh;overflow-y:auto;margin:8px 0 0"></pre>
     </div>
   </div>
@@ -600,16 +601,28 @@ function updateProv(){
 
 // 运行日志：出问题时在设置页最下面看，截图发出来就知道卡在哪。
 // 存在本机，刷新页面、下课后再看都还在（最多 500 条）
+// 翻译、同步这类刷屏的记录之外，重要的（采音、Deepgram、录音、精修）另存一份 LOG_IMP，不会被刷屏挤掉
 const LOG = (() => { try { return JSON.parse(localStorage.getItem('lt.log')) || []; } catch(e){ return []; } })();
+const LOG_IMP = (() => { try { return JSON.parse(localStorage.getItem('lt.log2')) || []; } catch(e){ return []; } })();
+const LOG_NOISY = /^(翻译|识别 \d|云同步完成|录音已上传|录音已搬到|本机录音已清理)/;
 let logTimer = null;
 function log(msg){
   const d = new Date(), p = n => String(n).padStart(2, '0');
-  LOG.push(`${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${msg}`);
+  const line = `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} ${msg}`;
+  LOG.push(line);
   if (LOG.length > 500) LOG.splice(0, LOG.length - 500);
-  if (!logTimer) logTimer = setTimeout(() => { logTimer = null; try { localStorage.setItem('lt.log', JSON.stringify(LOG)); } catch(e){} }, 3000);
+  if (!LOG_NOISY.test(msg)){ LOG_IMP.push(line); if (LOG_IMP.length > 500) LOG_IMP.splice(0, LOG_IMP.length - 500); }
+  if (!logTimer) logTimer = setTimeout(() => { logTimer = null; try { localStorage.setItem('lt.log', JSON.stringify(LOG)); localStorage.setItem('lt.log2', JSON.stringify(LOG_IMP)); } catch(e){} }, 3000);
   if ($('#pSettings').classList.contains('show')) renderLog();
 }
 function renderLog(){ $('#logBox').textContent = LOG.slice(-150).reverse().join('\n') || '还没有记录'; }
+// 复制全部日志（iPad 上从框里选着复制会串行）；复制不了就存成文件
+async function copyLog(){
+  const text = '== 重要记录（不含翻译、同步），旧的在上 ==\n' + LOG_IMP.join('\n') + '\n\n== 全部记录，旧的在上 ==\n' + LOG.join('\n');
+  try { await navigator.clipboard.writeText(text); toast(`已复制 ${LOG_IMP.length + LOG.length} 条，直接粘贴发出去就行`); }
+  catch(e){ shareOrDownload(new Blob([text], {type:'text/plain;charset=utf-8'}), '运行日志.txt'); }
+}
+$('#btnCopyLog').onclick = copyLog;
 
 function pickMime(){
   if (!window.MediaRecorder) return '';
@@ -655,7 +668,12 @@ function realNow(){
   return Math.max(0, (now - L.wall0 - L.pausedMs) / 1000);
 }
 // 重新开始统计"收到了多少声音"（暂停、切后台回来、换采集方式之后）
-function capWindowReset(){ Object.assign(L, {capT0:performance.now(), capFrames:0, capChecked:false, diagT0:performance.now(), diagFrames:0}); }
+function capWindowReset(){
+  Object.assign(L, {capT0:performance.now(), capFrames:0, capChecked:false, diagT0:performance.now(), diagFrames:0, zeroRun:0, loudNoWord:0});
+  monReset();
+}
+// 每分钟的概况：收到多少声音、多少秒全是 0、多少秒明显有声音、Deepgram 回了几个词
+function monReset(){ L.mon = {t0:realNow(), at:performance.now(), sec:0, zero:0, loud:0, sq:0, n:0, words:0}; }
 
 async function buildCapture(i){
   const m = CAP_MODES[i], AC = window.AudioContext || window.webkitAudioContext;
@@ -712,6 +730,21 @@ async function switchCapture(){
   L.capFinal = true;
   log(`采音：几种方式都试过了，最好的是当前这种（${Math.round((tried[L.capMode] || 0) * 100)}%）`);
 }
+// 收到的声音一直是 0：麦克风被系统关了就重新要一次，没关就重建采音
+async function micFix(){
+  const tr = L.stream && L.stream.getAudioTracks()[0];
+  const st = !tr ? '没有' : tr.readyState === 'ended' ? '已被系统关掉' : tr.muted ? '被系统静音' : '看起来正常';
+  log(`⚠ 采音：连续 ${Math.round(L.zeroRun)} 秒收到的全是静音（麦克风${st}），重新接`);
+  L.zeroRun = 0;
+  try {
+    if (!tr || tr.readyState === 'ended'){
+      const s = await navigator.mediaDevices.getUserMedia(L.gum);
+      if (L.state === 'idle'){ s.getTracks().forEach(t => t.stop()); return; }
+      L.stream = s;
+    }
+    if (await buildCapture(L.capMode)) log('采音：已重新接好'); else log('采音：重新接没成功');
+  } catch(e){ log('采音：重新接没成功（' + e.message + '）'); toast('麦克风被 iPad 断开了，接不回来：点"暂停"再点"继续"试试', 7000); }
+}
 // 每秒：更新计时；开始 15 秒后检查收到的声音够不够；之后每 30 秒，声音不全就记一笔
 function capTick(){
   if (L.state !== 'running' || document.visibilityState === 'hidden') return;
@@ -731,6 +764,23 @@ function capTick(){
     if (ratio < 0.97) log(`最近 ${Math.round(win)} 秒只收到 ${Math.round(ratio * 100)}% 的声音`);
     L.diagT0 = now; L.diagFrames = 0;
   }
+  // 连续 5 秒收到的全是 0：iPad 把网页的声音断了（来电、通知、别的 App 占用麦克风），重新接
+  if (L.zeroRun >= 5 && now - (L.fixAt || 0) > 20000){ L.fixAt = now; micFix(); }
+  // 明显有人在说话，Deepgram 却 30 秒一个词都没回：连接多半卡住了，重连（没定稿的声音会重发）
+  if (L.engine === 'dg' && DG.ws && DG.ws.readyState === 1 && L.loudNoWord >= 15 && realNow() - DG.lastWordAt > 30 && now - (DG.kickAt || 0) > 60000){
+    log(`Deepgram：${Math.round(realNow() - DG.lastWordAt)} 秒里有 ${Math.round(L.loudNoWord)} 秒明显有声音，却一个词都没回，重连`);
+    DG.kickAt = now; L.loudNoWord = 0; DG.lost();
+  }
+  // 每分钟概况：不正常就记一笔，正常的 5 分钟记一笔
+  const M = L.mon, span = realNow() - M.t0;
+  if (span >= 60){
+    const got = M.sec / ((now - M.at) / 1000), db = M.n ? 10 * Math.log10(M.sq / M.n + 1e-12) : -120;
+    const bad = M.zero > 2 || got < 0.9 || (L.engine === 'dg' && M.loud > 20 && M.words < 5);
+    L.monCount = (L.monCount || 0) + 1;
+    if (bad || L.monCount % 5 === 0)
+      log(`${bad ? '⚠ ' : ''}最近 ${Math.round(span)} 秒：收到 ${Math.round(got * 100)}% 的声音，平均音量 ${Math.round(db)}dB，${Math.round(M.zero)} 秒全是静音，${Math.round(M.loud)} 秒明显有声音` + (L.engine === 'dg' ? `，Deepgram 回了 ${M.words} 个词` : ''));
+    monReset();
+  }
 }
 
 async function start(){
@@ -741,7 +791,8 @@ async function start(){
   try {
     // 全场：关掉 iPad 的降噪和自动增益（它们是给打电话设计的，会把离得远的人声当噪声压掉）
     const room = S.micMode !== 'near';
-    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:!room, autoGainControl:!room, channelCount:1}});
+    L.gum = {audio:{echoCancellation:false, noiseSuppression:!room, autoGainControl:!room, channelCount:1}};
+    stream = await navigator.mediaDevices.getUserMedia(L.gum);
   } catch(e){ toast('拿不到麦克风权限：' + e.message); return; }
   const track = stream.getAudioTracks()[0];
   const ts = (track && track.getSettings && track.getSettings()) || {};
@@ -927,7 +978,7 @@ const DG = {
   ws:null, opened:false, queue:[], sent:[], offset:null, inPos:0, cur:null, fails:0, retryAt:0, closing:false,
   confirmed:0, lastMsgAt:0, lastSendAt:0, openAt:0, dog:null,
   begin(){
-    Object.assign(this, {ws:null, queue:[], sent:[], map:[], audioPos:0, cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0});
+    Object.assign(this, {ws:null, queue:[], sent:[], map:[], audioPos:0, cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0, lastWordAt:0});
     clearInterval(this.dog); this.dog = setInterval(() => this.watch(), 2000);
     this.open();
   },
@@ -1027,6 +1078,7 @@ const DG = {
       return;
     }
     // ---- 定稿 ----
+    if (words.length){ this.lastWordAt = realNow(); L.loudNoWord = 0; if (L.mon) L.mon.words += words.length; }
     const fs = this.realT(m.start || 0), fe = this.realT((m.start || 0) + (m.duration || 0));
     if (fe > this.confirmed) this.confirmed = fe;
     // C：这段里刚才显示过、定稿却删掉的词，不让它凭空消失，留成淡色的"存疑"（⟦…⟧ 包起来）
@@ -1117,8 +1169,11 @@ function onFrame(f){
   if (L.state !== 'running') return;
   const n = f.length, t = Math.max(0, realNow() - n / L.rate);   // 这一块声音开始的课堂时间
   L.frames += n; L.capFrames += n; L.diagFrames += n;
-  let sum = 0; for (let i = 0; i < n; i++) sum += f[i] * f[i];
-  const rms = Math.sqrt(sum / n);
+  let sum = 0, peak = 0; for (let i = 0; i < n; i++){ const v = f[i]; sum += v * v; if (v > peak) peak = v; else if (-v > peak) peak = -v; }
+  const rms = Math.sqrt(sum / n), M = L.mon, fd = n / L.rate;
+  M.sec += fd; M.sq += sum; M.n += n;
+  if (peak < 1e-5){ M.zero += fd; L.zeroRun += fd; } else L.zeroRun = 0;   // 一点声音都没有（真安静也会有底噪，不会是 0）
+  if (rms > 0.015){ M.loud += fd; L.loudNoWord += fd; }
   $('#level i').style.width = Math.min(100, rms * 900) + '%';
   if (L.mp3) mp3Push(f, t);
   if (L.engine === 'dg'){ DG.push(f, t); return; }
@@ -1585,10 +1640,12 @@ function addWordTimes(l, w){
   const n = splitW(w.w).length, e = w.e > w.s ? w.e : w.s;
   for (let k = 0; k < n; k++) (l.ws || (l.ws = [])).push(Math.round((w.s + (e - w.s) * k / n) * 100) / 100);
 }
+// 有没有真实的逐词时间（实时识别、Deepgram 精修有；老记录、Whisper 没有）
+const hasWordTimes = l => !!(l.ws && l.ws.length && l.ws.length >= splitW(l.en).length);
 // 每个词的开始时间；没存逐词时间的（老记录、Whisper）按词的长短把这句的时长分下去
 function wordTimes(l, nextT){
   const toks = splitW(l.en);
-  if (l.ws && l.ws.length >= toks.length) return l.ws.slice(0, toks.length);
+  if (hasWordTimes(l)) return l.ws.slice(0, toks.length);
   let end = Math.min(nextT == null ? Infinity : nextT - 0.2, l.t + toks.length * 0.42 + 0.8);
   if (!(end > l.t)) end = l.t + toks.length * 0.3;
   const wt = toks.map(x => x.replace(/[⟦⟧]/g, '').length + 2), sum = wt.reduce((a, b) => a + b, 0) || 1;
@@ -1730,12 +1787,15 @@ function plHL(t, jump){
   const li = hlFind(t);
   if (li !== HL.li){
     const old = HL.els[HL.li];
-    if (old){ old.classList.remove('cur'); old.querySelectorAll('.w.done,.w.now').forEach(x => x.classList.remove('done', 'now')); }
+    if (old){ old.classList.remove('cur', 'wt'); old.querySelectorAll('.w.done,.w.now').forEach(x => x.classList.remove('done', 'now')); }
     HL.li = li; HL.wi = -1;
     const el = HL.els[li];
     if (el){ el.classList.add('cur'); if (HL.follow) hlScroll(el, jump); }
   }
   const el = HL.els[li]; if (!el) return;
+  // 没有真实逐词时间的只高亮整句：估出来的时间对不上老师的语速，逐词跳反而越跳越慢
+  if (!hasWordTimes(HL.lines[li])) return;
+  el.classList.add('wt');
   const ts = HL.times[li] || (HL.times[li] = wordTimes(HL.lines[li], (HL.lines[li + 1] || {}).t));
   let wi = -1; for (let k = 0; k < ts.length && ts[k] <= t + 0.05; k++) wi = k;
   if (wi === HL.wi) return;
@@ -1889,15 +1949,80 @@ function wordsToLines(words){
   }
   return lines.map(l => Object.assign({t:l.t, en:l.en, zh:'', ws:l.ws}, l.spk === undefined ? {} : {spk:l.spk}));
 }
-async function refineDeepgram(blob){
+// Deepgram 离线识别一个文件 → 带时间、说话人的词（用完整的逐词结果，不用它整理过的分段，免得分段漏了词也跟着漏）
+async function dgWords(blob){
   const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:'en', smart_format:'true', punctuate:'true', diarize:'true', utterances:'true'});
   if (/^nova-3/.test(p.get('model'))) parseGlossary().slice(0, 100).forEach(g => p.append('keyterm', g.en));
-  const res = await fetchT('https://api.deepgram.com/v1/listen?' + p, {method:'POST', headers:{Authorization:'Token ' + S.keys.dg.trim(), 'Content-Type':blob.type || 'audio/mpeg'}, body:blob}, 15 * 60e3);
-  if (!res.ok) throw await httpErr(res);
-  const j = await res.json(), r = j.results || {};
-  const utts = r.utterances || [];
-  const words = utts.length ? utts.flatMap(u => (u.words || []).map(w => Object.assign({}, w, {speaker:w.speaker ?? u.speaker})))
-    : ((((r.channels || [])[0] || {}).alternatives || [{}])[0].words || []);
+  for (let attempt = 0; ; attempt++){
+    try {
+      const res = await fetchT('https://api.deepgram.com/v1/listen?' + p, {method:'POST', headers:{Authorization:'Token ' + S.keys.dg.trim(), 'Content-Type':blob.type || 'audio/mpeg'}, body:blob}, 15 * 60e3);
+      if (!res.ok) throw await httpErr(res);
+      const r = (await res.json()).results || {};
+      const words = ((((r.channels || [])[0] || {}).alternatives || [{}])[0].words || []);
+      if (words.length) return words;
+      return (r.utterances || []).flatMap(u => (u.words || []).map(w => Object.assign({}, w, {speaker:w.speaker ?? u.speaker})));
+    } catch(e){
+      if (attempt >= 1 || [400, 401, 402, 403].includes(e.status)) throw e;
+      log('精修：Deepgram 出错（' + netMsg(e).slice(0, 80) + '），5 秒后重试'); await sleep(5000);
+    }
+  }
+}
+// MP3（lamejs 压的，固定 40kbps）按时间切一段：每秒正好 5000 字节，每块都能单独解码
+const MP3_BPS = MP3_KBPS * 1000 / 8;
+const mp3Slice = (blob, a, b) => blob.slice(Math.max(0, Math.floor(a * MP3_BPS)), Math.ceil(b * MP3_BPS), 'audio/mpeg');
+// 识别 [a, b] 这一段：长的按 10 分钟一块（块之间重叠 4 秒），只要落在 [a, b) 里的词。
+// 每块的说话人编号是各自的，对不上整节课的，所以去掉
+async function dgRange(blob, a, b){
+  const out = [];
+  for (let s = a; s < b; s += 600){
+    const e = Math.min(b, s + 600), from = Math.max(0, s - 2);
+    const ws = await dgWords(mp3Slice(blob, from, e + 2));
+    for (const w of ws){
+      const st = w.start + from;
+      if (st >= s && st < e) out.push({word:w.word, punctuated_word:w.punctuated_word, start:st, end:w.end + from});
+    }
+  }
+  return out;
+}
+// Whisper 补一段：它只给句子级时间，把句子里的词按顺序平分这句的时长
+async function whisperRange(blob, a, b){
+  const out = [];
+  for (const sg of await whisperFile(mp3Slice(blob, a, b))){
+    const text = (sg.text || '').trim(); if (!text || HALLU.test(text)) continue;
+    const toks = splitW(text), s0 = a + sg.start, d = Math.max(0.1, (sg.end - sg.start) / toks.length);
+    toks.forEach((t, k) => { if (s0 + k * d < b) out.push({word:t, punctuated_word:t, start:s0 + k * d, end:s0 + (k + 1) * d}); });
+  }
+  return out;
+}
+// 整节课一次识别（说话人编号整节课一致）→ 检查哪里超过 30 秒没出字，把那几段单独再识别一遍补上
+async function refineDeepgram(blob, set){
+  const total = blob.size / MP3_BPS;
+  let words;
+  try { words = await dgWords(blob); }
+  catch(e){
+    if (!/mpeg/.test(blob.type) || [401, 402, 403].includes(e.status)) throw e;
+    log('精修：整节课一次识别没成功（' + netMsg(e).slice(0, 80) + '），改成 10 分钟一块识别');
+    set('改成分块识别…', 0.2);
+    words = await dgRange(blob, 0, total);
+  }
+  words = words.filter(w => w.punctuated_word || w.word).sort((x, y) => x.start - y.start);
+  if (/mpeg/.test(blob.type)){
+    const gaps = []; let prev = 0;
+    for (const w of words.concat([{start:total, end:total}])){ if (w.start - prev > 30) gaps.push([prev, w.start]); prev = Math.max(prev, w.end); }
+    for (let i = 0; i < gaps.length; i++){
+      const [a, b] = gaps[i], span = `${fmtT(a)}–${fmtT(b)}`;
+      set(`检查漏掉的地方 ${i + 1}/${gaps.length}（${span}）…`, 0.3 + 0.15 * i / gaps.length);
+      let add = [], by = 'Deepgram';
+      try { add = await dgRange(blob, a, b); } catch(e){ log(`精修：${span} 补识别出错（${netMsg(e).slice(0, 80)}）`); }
+      if (add.length < (b - a) / 30 && S.keys.groq.trim()){   // 几乎没补到：换 Whisper 再试
+        try { const w2 = await whisperRange(blob, a, b); if (w2.length > add.length){ add = w2; by = 'Whisper'; } }
+        catch(e){ log(`精修：${span} Whisper 补识别出错（${netMsg(e).slice(0, 80)}）`); }
+      }
+      log(add.length ? `精修：${span} 有 ${Math.round(b - a)} 秒没出字，${by} 重新识别补回 ${add.length} 个词` : `精修：${span} 有 ${Math.round(b - a)} 秒没出字，重新识别也没有，应该是没人说话`);
+      words = words.concat(add);
+    }
+    words.sort((x, y) => x.start - y.start);
+  }
   return wordsToLines(words);
 }
 // Groq Whisper：一次最多 25MB，大的 MP3 按字节切成 15MB 一块（MP3 每块都能单独解码），按块的起点换算时间
@@ -1953,9 +2078,10 @@ async function refineSession(sid){
       if (S.keys.dg.trim()){
         try {
           set('准备录音…', 0.02);
-          const blob = segs.length === 1 ? await segBlob(sess, segs[0]) : (await mergeToMp3(sess, p => set(`合成录音 ${Math.round(p * 100)}%`, p * 0.1))).blob;
+          // 要 MP3（才能按时间切出漏掉的段补识别）；老的 m4a 录音先转一下
+          const blob = segs.length === 1 && /mpeg/.test(segs[0].mime) ? await segBlob(sess, segs[0]) : (await mergeToMp3(sess, p => set(`合成录音 ${Math.round(p * 100)}%`, p * 0.1))).blob;
           set('Deepgram 识别中，1 小时的课大约要一两分钟…', 0.12);
-          lines = await refineDeepgram(blob); by = 'Deepgram';
+          lines = await refineDeepgram(blob, set); by = 'Deepgram';
         } catch(e){
           if (!S.keys.groq.trim()) throw e;
           log('精修：Deepgram 没成功（' + netMsg(e).slice(0, 120) + '），改用 Groq Whisper'); lines = null;
@@ -1992,6 +2118,7 @@ async function refineSession(sid){
         sess.lines = lines; await DB.putSession(sess);
         if (curSess && curSess.id === sid){ curSess = sess; renderSessLines(); }
       }
+      if (k + 8 < todo.length) await sleep(2000);   // 每批之间停一下：免费模型每分钟有次数限制，连着发容易撞上
     }
     toast(`「${sess.title}」精修好了`); log('精修完成：' + sess.title);
   } catch(e){ toast('精修没完成：' + e.message, 7000); log('精修：' + e.message); }
@@ -2123,7 +2250,7 @@ function renderSessLines(){
     const el = e.target.closest('.line'); if (!el || !P.segs.length) return;
     const i = +el.dataset.i, w = e.target.closest('.w');
     let t = lines[i].t - 0.3;
-    if (w){ const ts = HL.times[i] || (HL.times[i] = wordTimes(lines[i], (lines[i + 1] || {}).t)); t = (ts[+w.dataset.k] ?? lines[i].t) - 0.15; }
+    if (w && hasWordTimes(lines[i])){ const ts = HL.times[i] || (HL.times[i] = wordTimes(lines[i], (lines[i + 1] || {}).t)); t = (ts[+w.dataset.k] ?? lines[i].t) - 0.15; }
     plUnlock(); hlFollow(true);
     plAt(Math.max(0, t));
   };

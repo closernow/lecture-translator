@@ -1,2 +1,5 @@
 # Google OAuth 客户端密钥（网页用不到，绝不能提交，仓库是公开的）
 client_secret*.json
+
+# 用户给的上课录音和字幕样本（排查问题用，隐私，不能提交）
+samples/
