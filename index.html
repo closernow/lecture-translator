@@ -46,6 +46,7 @@ a{color:#7fb7ff}
 .line .en .im{color:var(--muted)}
 .line .en .doubt{opacity:.4;font-style:italic}
 .spk{display:inline-block;margin-left:8px;padding:0 6px;border-radius:4px;font-size:11px;color:#111}
+.lang{display:inline-block;margin-left:8px;padding:0 6px;border-radius:4px;font-size:11px;background:#3d4552;color:#e8ecf1}
 .spk0{background:#7fb7ff}.spk1{background:#e6b45a}.spk2{background:#8fd18f}.spk3{background:#e48fb6}.spk4{background:#b49cf0}.spk5{background:#7fd6d0}
 .caret{display:inline-block;width:2px;height:1em;margin-left:3px;vertical-align:-0.12em;background:var(--accent);animation:blink 1s steps(1) infinite}
 @keyframes blink{50%{opacity:0}}
@@ -204,6 +205,7 @@ a{color:#7fb7ff}
       </select></div>
       <div class="hint" style="margin:-4px 0 10px">每台设备各自记住，不跟云同步。主界面"开始"旁边也能切换。</div>
       <div class="row"><label>区分说话人</label><input type="checkbox" id="diarize" style="width:20px;height:20px"><span class="hint">实时字幕换人时另起一行，标"说话人 1/2…"（只对实时识别有效）</span></div>
+      <div class="row"><label>多语言（实验）</label><input type="checkbox" id="multiLang" style="width:20px;height:20px"><span class="hint">实时和精修都自动认语言（中文、印地语、西班牙语等 50 多种）：中文翻成英文，其他语言翻成中文，原文旁标出语言。口音重的英文可能被认成别的语言，不好用就关掉</span></div>
       <div class="row"><label>Deepgram 模型</label><input type="text" id="dgModel"></div>
       <div class="row"><label>Whisper 模型</label><input type="text" id="asrModel"></div>
       <div class="row"><label>灵敏度</label><input type="range" id="sens" min="1" max="5" step="1"><span id="sensV" class="hint"></span></div>
@@ -316,7 +318,7 @@ const PROVIDERS = [
 
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
-  asrEngine:'auto', dgModel:'nova-3', asrModel:'whisper-large-v3', micMode:'room', diarize:true,
+  asrEngine:'auto', dgModel:'nova-3', asrModel:'whisper-large-v3', micMode:'room', diarize:true, multiLang:false,
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
   showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3, keepDays:30,
@@ -331,7 +333,7 @@ function loadSettings(){
   S.models = Object.assign({}, saved.models || {});
 }
 // 这些跟着账号走，云同步；字号、中文亮度等显示设置、收音模式（每台设备放的位置不一样）每台设备各自保存
-const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'diarize', 'models', 'enabled', 'glossary', 'sensitivity'];
+const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'diarize', 'multiLang', 'models', 'enabled', 'glossary', 'sensitivity'];
 const syncPart = () => JSON.stringify(SYNC_KEYS.map(k => S[k]));
 let lastSyncPart = '';
 function saveSettings(){
@@ -475,7 +477,7 @@ async function transcribe(wav, prompt){
       const fd = new FormData();
       fd.append('file', wav, 'seg.wav');
       fd.append('model', S.asrModel.trim() || 'whisper-large-v3');
-      fd.append('language', 'en');
+      if (!S.multiLang) fd.append('language', 'en');   // 多语言：不指定，让它自己认
       fd.append('response_format', 'verbose_json');
       fd.append('temperature', '0');
       if (prompt) fd.append('prompt', prompt);
@@ -503,6 +505,32 @@ async function transcribe(wav, prompt){
   throw new Error('识别多次失败');
 }
 
+/* ================= 多语言（设置里的"多语言（实验）"） =================
+   Deepgram 用 language=multi 自动认语言（每个词带 language），Whisper 不指定语言让它自己认；
+   每句记下主要语言 l.lang（英文不记）；翻译：中文 → 英文，其他 → 中文 */
+const dgLang = () => S.multiLang ? 'multi' : 'en';
+// 术语表提示只在 nova-3 只认英文时加（多语言模式下加了可能被拒）
+const dgKeyterms = p => /^nova-3/.test(p.get('model')) && !S.multiLang;
+const LANG_NAMES = {zh:'中文', hi:'印地语', es:'西班牙语', fr:'法语', de:'德语', ru:'俄语', pt:'葡萄牙语', ja:'日语', it:'意大利语', nl:'荷兰语',
+  ko:'韩语', ar:'阿拉伯语', vi:'越南语', ta:'泰米尔语', gu:'古吉拉特语', pa:'旁遮普语', ur:'乌尔都语', tl:'他加禄语', uk:'乌克兰语', pl:'波兰语',
+  tr:'土耳其语', fa:'波斯语', bn:'孟加拉语', te:'泰卢固语', mr:'马拉地语', id:'印尼语', ms:'马来语', th:'泰语', el:'希腊语', ro:'罗马尼亚语'};
+const langCode = c => (c || '').toLowerCase().split('-')[0];
+// 一句的语言：识别给了就用；没给（Whisper）但里面有中日文字的，当中文
+const lineLang = l => l.lang || (CJK_CH.test(l.en || '') ? 'zh' : '');
+const langTag = c => { c = langCode(c); return c && c !== 'en' ? `<span class="lang">${LANG_NAMES[c] || c.toUpperCase()}</span>` : ''; };
+// 一句里每个词的语言计数，取最多的那种当这句的语言
+function addLang(line, lang){
+  lang = langCode(lang); if (!lang) return;
+  const c = line._lc || (line._lc = {}); c[lang] = (c[lang] || 0) + 1;
+  const top = Object.keys(c).reduce((a, b) => c[a] >= c[b] ? a : b);
+  if (top === 'en') delete line.lang; else line.lang = top;
+}
+// 中文、日文这类不用空格分词：识别结果里词和词之间的空格去掉再显示、翻译、导出
+const CJK = '\\u3040-\\u30ff\\u3400-\\u9fff\\uf900-\\ufaff\\u3000-\\u303f\\uff00-\\uffef';
+const CJK_GAP = new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, 'g'), CJK_CH = new RegExp(`[${CJK}]`);
+const cjkTight = s => (s || '').replace(CJK_GAP, '$1');
+const SENT_END = /[.?!。？！।]["')\]」』]?⟧?$/;
+
 /* ================= Translation ================= */
 const cooldown = {};
 let activeProvider = null;
@@ -514,8 +542,19 @@ Translate the numbered English lines (speech-recognition output) into natural, c
 - Keep numbers, units, model names and code references (e.g. B149.1) as written.
 - Output ONLY the translations, one per line, in the format "[n] 译文", same numbering. No notes, no extra text.`;
 
+// 多语言模式：中文翻成英文，其他语言（包括英文）翻成中文
+const SYS_PROMPT_MULTI = `You are a live interpreter for an HVAC / gas technician college lecture in Ontario, Canada. Most speech is English, but students may speak Chinese, Hindi, Punjabi, Spanish or any other language.
+Translate each numbered line (speech-recognition output):
+- If the line is (mainly) Chinese, translate it into natural, concise English.
+- Otherwise (English or any other language), translate it into natural, concise Simplified Chinese.
+- The recognition may contain errors; use the context and HVAC knowledge to infer what the speaker meant.
+- Use the glossary translations exactly when the terms appear.
+- Keep numbers, units, model names and code references (e.g. B149.1) as written.
+- Output ONLY the translations, one per line, in the format "[n] translation", same numbering. No notes, no extra text.`;
+const trPrompt = () => S.multiLang ? SYS_PROMPT_MULTI : SYS_PROMPT;
+
 // 存疑的词（⟦…⟧，识别自己都删掉了的）不拿去翻译，免得译出乱七八糟的东西
-const sureText = s => (s || '').replace(/⟦[^⟧]*⟧?/g, ' ').replace(/\s+/g, ' ').trim();
+const sureText = s => cjkTight((s || '').replace(/⟦[^⟧]*⟧?/g, ' ').replace(/\s+/g, ' ').trim());
 function buildUser(items, context){
   const ens = items.map(i => sureText(i.en) || '…');
   context = context.map(sureText);
@@ -991,10 +1030,10 @@ const DG = {
     this.open();
   },
   url(){
-    const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:'en', encoding:'linear16', sample_rate:'16000', channels:'1',
+    const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:dgLang(), encoding:'linear16', sample_rate:'16000', channels:'1',
       interim_results:'true', smart_format:'true', punctuate:'true', endpointing:'300', utterance_end_ms:'1000', vad_events:'true'});
     if (S.diarize) p.set('diarize', 'true');   // 每个词标上是第几个说话人
-    if (/^nova-3/.test(p.get('model'))) parseGlossary().slice(0, 80).forEach(g => p.append('keyterm', g.en));   // 术语表帮助识别专业词（nova-3 才支持）
+    if (dgKeyterms(p)) parseGlossary().slice(0, 80).forEach(g => p.append('keyterm', g.en));   // 术语表帮助识别专业词
     return 'wss://api.deepgram.com/v1/listen?' + p;
   },
   // Deepgram 说的时间是"这条连接收到的第几秒声音"，换成课堂时间：
@@ -1076,7 +1115,8 @@ const DG = {
     if (m.type !== 'Results') return;
     const alt = m.channel && m.channel.alternatives && m.channel.alternatives[0];
     const tx = ((alt && alt.transcript) || '').trim();
-    let words = ((alt && alt.words) || []).map(w => ({w:w.punctuated_word || w.word, s:this.realT(w.start), e:this.realT(w.end), spk:w.speaker}));
+    const altLang = alt && alt.languages && alt.languages[0];   // 多语言模式：每个词带 language，整段也有
+    let words = ((alt && alt.words) || []).map(w => ({w:w.punctuated_word || w.word, s:this.realT(w.start), e:this.realT(w.end), spk:w.speaker, lang:w.language || altLang}));
     if (tx && !words.length) words = [{w:tx, s:this.realT(m.start || 0), e:this.realT((m.start || 0) + (m.duration || 0))}];
     if (!m.is_final){
       if (tx && !this.cur) this.newLine(words[0].s, S.diarize ? words[0].spk : undefined);
@@ -1106,15 +1146,16 @@ const DG = {
       const piece = w.doubt ? '⟦' + w.w + '⟧' : w.w;
       line.en = line.en ? (w.doubt && /⟧$/.test(line.en) ? line.en.slice(0, -1) + ' ' + w.w + '⟧' : line.en + ' ' + piece) : piece;
       addWordTimes(line, w);
+      if (!w.doubt) addLang(line, w.lang);
     }
     if (dropped.length) log(`识别删掉了 ${dropped.length} 个词，留成存疑：${dropped.map(w => w.w).join(' ')}`);
     const c = this.cur; if (!c) return;
     c.im = c.im.filter(w => w.s >= this.confirmed - 0.02);   // 定稿范围之后的灰字留着，不闪
     c.line.im = c.im.map(w => w.w).join(' ');
     renderLine(c.line);
-    // 断行只看句子：句号/问号/叹号结尾（至少 4 个词），或者太长了
+    // 断行只看句子：句号/问号/叹号结尾（至少 4 个词，中文的。？！也算），或者太长了
     const n = c.line.en.split(/\s+/).filter(Boolean).length;
-    if ((/[.?!]["')\]]?⟧?$/.test(c.line.en) && n >= 4) || n >= 40 || (n && this.confirmed - c.line.t > 25 && m.speech_final)) this.endLine('carry');
+    if ((SENT_END.test(c.line.en) && n >= 4) || n >= 40 || (n && this.confirmed - c.line.t > 25 && m.speech_final)) this.endLine('carry');
   },
   newLine(t, spk){
     const line = {id:L.nextId++, t, en:'', im:'', zh:'', status:'live'};
@@ -1280,7 +1321,7 @@ async function runTr(){
       const context = lines.slice(Math.max(0, firstIdx - 3), Math.max(0, firstIdx)).filter(l => l.en && l.status === 'done').map(l => l.en);
       const items = batch.map(b => b.line);
       try {
-        const out = await translateWithFallback(SYS_PROMPT, buildUser(items, context));
+        const out = await translateWithFallback(trPrompt(), buildUser(items, context));
         const zh = parseNumbered(out, items.length);
         items.forEach((l, k) => { l.zh = zh[k] || '（漏译）'; l.status = 'done'; });
       } catch(e){
@@ -1304,7 +1345,7 @@ async function runTr(){
 const dirtyTimers = new Map();
 function dirty(sess, lines){
   if (!sess) return;
-  sess.lines = lines.map(l => Object.assign({t:l.t, en:l.en, zh:l.zh}, l.spk === undefined ? {} : {spk:l.spk}, l.ws ? {ws:l.ws} : {}));
+  sess.lines = lines.map(l => Object.assign({t:l.t, en:l.en, zh:l.zh}, l.spk === undefined ? {} : {spk:l.spk}, l.ws ? {ws:l.ws} : {}, l.lang ? {lang:l.lang} : {}));
   if (dirtyTimers.has(sess.id)) return;
   dirtyTimers.set(sess.id, setTimeout(() => { dirtyTimers.delete(sess.id); persistNow(sess); }, 3000));
 }
@@ -1692,13 +1733,15 @@ function wordTimes(l, nextT){
 }
 // 历史记录里的英文：每个词包一层，好逐词高亮、点词跳过去
 function enWordsHtml(en){
-  let doubt = false;
+  let doubt = false, prev = '';
   return splitW(en).map((tok, k) => {
     if (tok.startsWith('⟦')){ doubt = true; tok = tok.slice(1); }
     const d = doubt;
     if (tok.endsWith('⟧')){ doubt = false; tok = tok.slice(0, -1); }
-    return `<span class="w${d ? ' doubt' : ''}" data-k="${k}">${esc(tok)}</span>`;
-  }).join(' ');
+    const gap = k && !(CJK_CH.test(prev.slice(-1)) && CJK_CH.test(tok[0] || '')) ? ' ' : '';   // 中文词之间不留空格
+    prev = tok;
+    return `${gap}<span class="w${d ? ' doubt' : ''}" data-k="${k}">${esc(tok)}</span>`;
+  }).join('');
 }
 // l.shown：已经"打"出来几个词（没有这个字段就是全部显示）
 function enHtml(l){
@@ -1706,12 +1749,12 @@ function enHtml(l){
   const fin = splitW(l.en), im = l.status === 'live' ? splitW(l.im) : [];
   const total = fin.length + im.length, k = l.shown == null ? total : Math.min(l.shown, total);
   const a = fin.slice(0, k), b = im.slice(0, Math.max(0, k - fin.length));
-  return enMarkup(a.join(' ')) + (b.length ? (a.length ? ' ' : '') + '<span class="im">' + esc(b.join(' ')) + '</span>' : '')
+  return enMarkup(cjkTight(a.join(' '))) + (b.length ? (a.length ? ' ' : '') + '<span class="im">' + esc(cjkTight(b.join(' '))) + '</span>' : '')
     + (l.status === 'live' || k < total ? '<span class="caret"></span>' : '');
 }
 function lineHtml(l){
   const zh = l.status === 'tr' ? '翻译中…' : (l.status === 'asr' || l.status === 'live') ? '' : l.zh;
-  return `<div class="t">${fmtT(l.t)}${spkTag(l.spk)}</div><div class="en">${enHtml(l)}</div><div class="zh">${esc(zh)}</div>`;
+  return `<div class="t">${fmtT(l.t)}${spkTag(l.spk)}${langTag(lineLang(l))}</div><div class="en">${enHtml(l)}</div><div class="zh">${esc(zh)}</div>`;
 }
 function paintLine(l){
   const box = $('#subs');
@@ -1984,14 +2027,15 @@ function wordsToLines(words){
     if (!cur || (spk !== undefined && spk !== cur.spk) || w.start - cur.end > 2){ cur = {t:w.start, en:'', spk, end:w.end, n:0, ws:[]}; lines.push(cur); }
     cur.en = cur.en ? cur.en + ' ' + text : text; cur.end = w.end; cur.n++;
     addWordTimes(cur, {w:text, s:w.start, e:w.end});
-    if ((/[.?!]["')\]]?$/.test(text) && cur.n >= 4) || cur.n >= 40) cur = null;
+    addLang(cur, w.language);
+    if ((SENT_END.test(text) && cur.n >= 4) || cur.n >= 40) cur = null;
   }
-  return lines.map(l => Object.assign({t:l.t, en:l.en, zh:'', ws:l.ws}, l.spk === undefined ? {} : {spk:l.spk}));
+  return lines.map(l => Object.assign({t:l.t, en:l.en, zh:'', ws:l.ws}, l.spk === undefined ? {} : {spk:l.spk}, l.lang ? {lang:l.lang} : {}));
 }
 // Deepgram 离线识别一个文件 → 带时间、说话人的词（用完整的逐词结果，不用它整理过的分段，免得分段漏了词也跟着漏）
 async function dgWords(blob){
-  const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:'en', smart_format:'true', punctuate:'true', diarize:'true', utterances:'true'});
-  if (/^nova-3/.test(p.get('model'))) parseGlossary().slice(0, 100).forEach(g => p.append('keyterm', g.en));
+  const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:dgLang(), smart_format:'true', punctuate:'true', diarize:'true', utterances:'true'});
+  if (dgKeyterms(p)) parseGlossary().slice(0, 100).forEach(g => p.append('keyterm', g.en));
   for (let attempt = 0; ; attempt++){
     try {
       const res = await fetchT('https://api.deepgram.com/v1/listen?' + p, {method:'POST', headers:{Authorization:'Token ' + S.keys.dg.trim(), 'Content-Type':blob.type || 'audio/mpeg'}, body:blob}, 15 * 60e3);
@@ -2018,7 +2062,7 @@ async function dgRange(blob, a, b){
     const ws = await dgWords(mp3Slice(blob, from, e + 2));
     for (const w of ws){
       const st = w.start + from;
-      if (st >= s && st < e) out.push({word:w.word, punctuated_word:w.punctuated_word, start:st, end:w.end + from});
+      if (st >= s && st < e) out.push({word:w.word, punctuated_word:w.punctuated_word, start:st, end:w.end + from, language:w.language});
     }
   }
   return out;
@@ -2069,7 +2113,7 @@ async function whisperFile(blob){
   for (let attempt = 0; attempt < 5; attempt++){
     const fd = new FormData();
     fd.append('file', blob, 'audio' + (blob.type.includes('mpeg') ? '.mp3' : blob.type.includes('webm') ? '.webm' : '.m4a'));
-    fd.append('model', S.asrModel.trim() || 'whisper-large-v3'); fd.append('language', 'en');
+    fd.append('model', S.asrModel.trim() || 'whisper-large-v3'); if (!S.multiLang) fd.append('language', 'en');
     fd.append('response_format', 'verbose_json'); fd.append('temperature', '0');
     const prompt = whisperPrompt(''); if (prompt) fd.append('prompt', prompt);
     try {
@@ -2146,7 +2190,7 @@ async function refineSession(sid){
       const ctx = lines.slice(Math.max(0, idx[0] - 3), idx[0]).map(l => l.en);
       let out;
       for (let tries = 0; ; tries++){
-        try { out = await translateWithFallback(SYS_PROMPT, buildUser(items, ctx)); break; }
+        try { out = await translateWithFallback(trPrompt(), buildUser(items, ctx)); break; }
         catch(e){ if (tries >= 5) throw e; set('翻译模型都在限流，等一会儿再继续…', REFINE.pct); await sleep(15000); }
       }
       const zh = parseNumbered(out, items.length);
@@ -2299,7 +2343,7 @@ function renderSessLines(){
   if (!curSess) return;
   const lines = P.view === 'live' && curSess.liveLines ? curSess.liveLines : (curSess.lines || []);
   const box = $('#sessLines');
-  box.innerHTML = lines.map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}${spkTag(l.spk)}</div><div class="en">${enWordsHtml(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
+  box.innerHTML = lines.map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}${spkTag(l.spk)}${langTag(lineLang(l))}</div><div class="en">${enWordsHtml(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
   Object.assign(HL, {lines, times:[], els:[...box.querySelectorAll('.line')], li:-1, wi:-1});
   if (P.i >= 0) plHL(plCur(), true);   // 精修中途重画了，高亮接着
   // 点一个词：从这个词开始播；点这句的别处：从句首播
@@ -2338,8 +2382,9 @@ async function shareOrDownload(blob, filename){
 // 文字记录（导出和 Drive 文件夹里的"文字记录.txt"用同一个格式）
 function sessionText(s){
   const head = `${s.title}\n${new Date(s.createdAt).toLocaleString()}  时长 ${fmtT(s.duration || 0)}\n\n`;
-  const plain = t => (t || '').replace(/⟦([^⟧]*)⟧?/g, '($1?)');   // 存疑的词写成 (xxx?)
-  return head + (s.lines || []).map(l => `[${fmtT(l.t)}] ${spkName(l.spk) ? spkName(l.spk) + '：' : ''}${plain(l.en)}\n${l.zh || ''}\n`).join('\n');
+  const plain = t => cjkTight((t || '').replace(/⟦([^⟧]*)⟧?/g, '($1?)'));   // 存疑的词写成 (xxx?)
+  const lang = c => { c = langCode(c); return c && c !== 'en' ? `[${LANG_NAMES[c] || c.toUpperCase()}] ` : ''; };
+  return head + (s.lines || []).map(l => `[${fmtT(l.t)}] ${spkName(l.spk) ? spkName(l.spk) + '：' : ''}${lang(lineLang(l))}${plain(l.en)}\n${l.zh || ''}\n`).join('\n');
 }
 $('#btnExportTxt').onclick = () => {
   if (!curSess) return;
@@ -2381,7 +2426,7 @@ function shareDownload(blob, filename){
 /* settings */
 function fillSettings(){
   $('#kDg').value = S.keys.dg; $('#kGroq').value = S.keys.groq; $('#kGemini').value = S.keys.gemini; $('#kSf').value = S.keys.sf;
-  $('#asrEngine').value = S.asrEngine; $('#micMode').value = S.micMode; $('#diarize').checked = !!S.diarize; $('#dgModel').value = S.dgModel; $('#asrModel').value = S.asrModel; $('#sens').value = S.sensitivity; $('#sensV').textContent = S.sensitivity;
+  $('#asrEngine').value = S.asrEngine; $('#micMode').value = S.micMode; $('#diarize').checked = !!S.diarize; $('#multiLang').checked = !!S.multiLang; $('#dgModel').value = S.dgModel; $('#asrModel').value = S.asrModel; $('#sens').value = S.sensitivity; $('#sensV').textContent = S.sensitivity;
   $('#glossary').value = S.glossary;
   $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
   $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
@@ -2413,6 +2458,7 @@ $('#micMode').onchange = () => setMicMode($('#micMode').value);
 // 主界面的小开关：全场（手机在自己座位上）↔ 近处（手机在老师旁边，通话模式）
 $('#btnMic').onclick = () => { setMicMode(S.micMode === 'near' ? 'room' : 'near'); toast(S.micMode === 'near' ? '近处（通话模式）：手机放在老师旁边时用' : '全场：手机放在自己座位上时用', 3000); };
 $('#diarize').onchange = () => { S.diarize = $('#diarize').checked; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
+$('#multiLang').onchange = () => { S.multiLang = $('#multiLang').checked; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
 $('#asrEngine').onchange =() => { S.asrEngine = $('#asrEngine').value; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
 $('#keepDays').onchange = () => { const v = Math.round(+$('#keepDays').value); S.keepDays = isFinite(v) && v >= 0 ? v : 30; $('#keepDays').value = S.keepDays; saveSettings(); Cloud.schedule(1000); };
 $('#dgModel').onchange =() => { S.dgModel = $('#dgModel').value.trim() || 'nova-3'; saveSettings(); };
