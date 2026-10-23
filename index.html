@@ -1380,12 +1380,42 @@ const Cloud = {
       await this.api('DELETE', 'https://www.googleapis.com/drive/v3/files/' + f.id);
       this.ids.delete(f.name);
     }
+    // 下课后：几段小录音合成一个"整节课录音.mp3"，Drive 和本机都只留这一个（只由录这节课的设备做）
+    const mergeFail = lsGet('lt.mergeFail', {});
+    for (const s of sessNow.values()){
+      if (!mine(s) || (s.segs || []).length < 2 || (P.sess && P.sess.id === s.id) || (mergeFail[s.id] || 0) >= 2) continue;
+      const show = p => { this.msg = `正在合成「${s.title}」的整节课录音… ${Math.round(p * 100)}%`; renderCloud(); };
+      try {
+        show(0);
+        const {blob, dur} = await mergeToMp3(s, show);
+        const meta = {idx:MERGED_IDX, t0:0, dur, mime:'audio/mpeg'}, key = s.id + '-' + MERGED_IDX;
+        this.audio.set(key, await this.uploadFile({name:'整节课录音.mp3', parents:[await folderOf(s)], appProperties:{lt:'audio', sid:s.id, idx:String(MERGED_IDX)}}, blob, this.audio.get(key)));
+        await DB.putSeg(Object.assign({sessionId:s.id, blob, own:true, up:true}, meta));
+        // 合成的传好了，才删小段
+        for (const g of s.segs){
+          if (g.idx === MERGED_IDX) continue;
+          const id = this.audio.get(s.id + '-' + g.idx);
+          if (id){ try { await this.api('DELETE', 'https://www.googleapis.com/drive/v3/files/' + id); } catch(e){ if (e.status !== 404) throw e; } this.audio.delete(s.id + '-' + g.idx); }
+          await DB.delKey(DB.segKey(s.id, g.idx));
+        }
+        s.segs = [meta]; await DB.putSession(s);
+        this.again = true;   // 课的信息变了（录音只剩一个），再同步一轮
+        log(`已合成整节课录音：${s.title}，${Math.round(dur / 60)} 分钟 ${(blob.size / 1048576).toFixed(1)}MB，小段已删`);
+      } catch(e){
+        if (e.status === 401) throw e;
+        if (!e.net && !e.status) { mergeFail[s.id] = (mergeFail[s.id] || 0) + 1; lsSet('lt.mergeFail', mergeFail); }   // 联网问题下次再试；文件本身有问题试两次就算了
+        log(`合成整节课录音没成功：${s.title}（${e.message}），小段先留着`);
+      }
+      this.msg = '同步中…'; renderCloud();
+    }
+
     // 本机录的录音：传上去；传上去的，本机超过保留天数就删（要听时再从云端下载）
     const keepMs = Math.max(0, +S.keepDays || 0) * 86400e3;
     for (const r of await DB.allSegs()){
       if (!r.blob) continue;
       const sess = sessNow.get(r.sessionId);
       if (!sess){ await DB.delKey(r.key); continue; }   // 课已经删了
+      if (!(sess.segs || []).some(g => g.idx === r.idx)){ await DB.delKey(r.key); continue; }   // 已经合成成整节课录音，旧小段不要了
       const key = r.sessionId + '-' + r.idx;
       if (!r.up){
         if (!this.audio.has(key)){
@@ -1592,6 +1622,59 @@ async function plLoad(a, blob, type){
     }
   }
 }
+/* 合成整节课录音：把几段录音按顺序解码、接起来，压成一个 MP3（人声够清楚，1 小时约 18MB）。
+   导出时用；下课后也自动合成一份放进 Drive，代替那些 3 分钟的小段 */
+const MERGED_IDX = 1000, MP3_RATE = 22050, MP3_KBPS = 40;
+let lameP = null;
+function loadLame(){
+  if (window.lamejs && lamejs.Mp3Encoder) return Promise.resolve();
+  if (!lameP) lameP = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js';
+    s.onload = res; s.onerror = () => { lameP = null; s.remove(); const e = new Error('MP3 压缩库加载失败（要联网）'); e.net = true; rej(e); };
+    document.head.appendChild(s);
+  });
+  return lameP;
+}
+// 解码成指定采样率的声音（浏览器解码时顺便换采样率）
+async function decodeAt(blob, rate){
+  const ab = await blob.arrayBuffer();
+  return new Promise((res, rej) => new OfflineAudioContext(1, 1, rate).decodeAudioData(ab, res, e => rej(new Error('录音解码失败' + (e && e.message ? '：' + e.message : '')))));
+}
+async function mergeToMp3(sess, onProg){
+  await loadLame();
+  const segs = (sess.segs || []).slice().sort((a, b) => a.t0 - b.t0);
+  const enc = new lamejs.Mp3Encoder(1, MP3_RATE, MP3_KBPS), out = [];
+  let total = 0;
+  for (let i = 0; i < segs.length; i++){
+    const buf = await decodeAt(await segBlob(sess, segs[i]), MP3_RATE);
+    const chs = Array.from({length:buf.numberOfChannels}, (_, c) => buf.getChannelData(c));
+    const pcm = new Int16Array(buf.length);
+    for (let j = 0; j < pcm.length; j++){
+      let v = 0; for (const ch of chs) v += ch[j];
+      v = Math.max(-1, Math.min(1, v / chs.length));
+      pcm[j] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
+    const step = 1152 * 32;
+    // 这段本该从第 t0 秒开始；前面接起来不够长（换段时的小空隙），补静音，字幕的时间点就和录音对得上
+    const gap = Math.round(segs[i].t0 * MP3_RATE) - total;
+    if (gap > MP3_RATE * 0.15){
+      const z = new Int16Array(step);
+      for (let k = 0; k < gap; k += step){ const mp3 = enc.encodeBuffer(z.subarray(0, Math.min(step, gap - k))); if (mp3.length) out.push(new Uint8Array(mp3)); }
+      total += gap;
+    }
+    for (let j = 0; j < pcm.length; j += step){
+      const mp3 = enc.encodeBuffer(pcm.subarray(j, j + step));
+      if (mp3.length) out.push(new Uint8Array(mp3));
+      if ((j / step) % 8 === 7) await sleep(0);   // 让页面喘口气，别卡住
+    }
+    total += pcm.length;
+    if (onProg) onProg((i + 1) / segs.length);
+  }
+  const end = enc.flush(); if (end.length) out.push(new Uint8Array(end));
+  return {blob:new Blob(out, {type:'audio/mpeg'}), dur:total / MP3_RATE};
+}
+
 async function plAt(t, play = true){
   const segs = P.segs; if (!segs.length) return;
   let i = segs.findIndex(s => t < s.t0 + s.dur); if (i < 0) i = segs.length - 1;
@@ -1637,7 +1720,7 @@ async function openSession(id){
   Object.assign(P, {sess:curSess, segs, total:segs.length ? Math.max(curSess.duration || 0, segs[segs.length - 1].t0 + segs[segs.length - 1].dur) : 0});
   $('#plBar').max = P.total || 1; $('#plBar').value = 0;
   $('#pl').style.display = segs.length ? '' : 'none';
-  $('#btnExportAudio').disabled = !segs.length;
+  resetExportBtn();
   plShow();
   const ownHere = !curSess.device || curSess.device === DEVICE_ID;
   $('#sessHint').textContent = segs.length ? '点任意一句，录音跳到那里播放。' + (ownHere ? '' : '录音在云端，第一次播放要下载。')
@@ -1685,22 +1768,33 @@ $('#btnExportTxt').onclick = () => {
   if (!curSess) return;
   shareOrDownload(new Blob([sessionText(curSess)], {type:'text/plain;charset=utf-8'}), safeName(curSess.title) + '.txt');
 };
+// 导出录音：永远是一个文件。几段的先合成一个 MP3。
+// 合成要花点时间，iPad 只允许"手指点的当下"弹出分享，所以合成好后按钮变成"保存整节课录音"，再点一下保存
+let exportReady = null;   // {sid, blob, name}
+function resetExportBtn(){ exportReady = null; const b = $('#btnExportAudio'); b.textContent = '导出录音'; b.disabled = !P.segs.length; }
 $('#btnExportAudio').onclick = async () => {
   if (!curSess || !P.segs.length) return;
-  const sess = curSess, files = [];
+  const sess = curSess, btn = $('#btnExportAudio');
+  if (exportReady && exportReady.sid === sess.id){ const r = exportReady; resetExportBtn(); return shareOrDownload(r.blob, r.name); }
+  const t0 = Date.now();
+  btn.disabled = true;
   try {
-    for (const seg of P.segs){
-      const blob = await segBlob(sess, seg);
-      const ext = seg.mime.includes('webm') ? '.webm' : '.m4a';
-      files.push(new File([blob], safeName(sess.title) + (P.segs.length > 1 ? '_' + String(files.length + 1).padStart(2, '0') : '') + ext, {type:seg.mime}));
+    let blob, name = safeName(sess.title);
+    if (P.segs.length === 1){
+      const seg = P.segs[0];
+      blob = await segBlob(sess, seg);
+      name += seg.mime.includes('mpeg') ? '.mp3' : seg.mime.includes('webm') ? '.webm' : '.m4a';
+    } else {
+      btn.textContent = '合成中…';
+      blob = (await mergeToMp3(sess, p => { btn.textContent = `合成中 ${Math.round(p * 100)}%`; })).blob;
+      name += '.mp3';
     }
-  } catch(e){ toast(e.message); return; }
-  if (files.length === 1) return shareOrDownload(files[0], files[0].name);
-  // 多段：iPad 上一次分享全部（可以"存储到文件"），不支持就逐个下载
-  if (navigator.canShare && navigator.canShare({files})){
-    try { await navigator.share({files}); return; } catch(e){ if (e.name === 'AbortError') return; }
-  }
-  for (const f of files){ shareDownload(f, f.name); await sleep(400); }
+    if (curSess !== sess) return;
+    if (Date.now() - t0 < 800){ resetExportBtn(); return shareOrDownload(blob, name); }   // 很快就好了，直接弹
+    exportReady = {sid:sess.id, blob, name};
+    btn.textContent = `保存整节课录音（${(blob.size / 1048576).toFixed(1)}MB）`; btn.disabled = false;
+    toast('合成好了，点"保存整节课录音"保存');
+  } catch(e){ toast(e.message, 6000); log('导出录音：' + e.message); resetExportBtn(); }
 };
 function shareDownload(blob, filename){
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename;
