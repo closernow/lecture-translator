@@ -44,6 +44,9 @@ a{color:#7fb7ff}
 .hide-zh .line .zh{display:none}
 .line.asr .en{color:var(--muted);font-style:italic}
 .line .en .im{color:var(--muted)}
+.line .en .doubt{opacity:.4;font-style:italic}
+.spk{display:inline-block;margin-left:8px;padding:0 6px;border-radius:4px;font-size:11px;color:#111}
+.spk0{background:#7fb7ff}.spk1{background:#e6b45a}.spk2{background:#8fd18f}.spk3{background:#e48fb6}.spk4{background:#b49cf0}.spk5{background:#7fd6d0}
 .caret{display:inline-block;width:2px;height:1em;margin-left:3px;vertical-align:-0.12em;background:var(--accent);animation:blink 1s steps(1) infinite}
 @keyframes blink{50%{opacity:0}}
 .line.tr .zh{font-style:italic}
@@ -140,6 +143,11 @@ a{color:#7fb7ff}
       <button id="btnExportAudio">导出录音</button>
       <button id="btnDelete" style="background:#3a2222">删除</button>
     </div>
+    <div class="row">
+      <button id="btnRefine">精修</button>
+      <button id="btnLiveVer" style="display:none">看实时版</button>
+    </div>
+    <div class="hint" id="refineInfo">精修：下课后把整节课录音重新识别一遍（更全、区分说话人），再结合上下文重新翻译。需要时才点，会用一点 Deepgram 额度。</div>
     <div class="hint" id="sessHint">点任意一句，录音跳到那里播放。</div>
     <div id="sessLines" class="clickable" style="margin-top:14px"></div>
   </div>
@@ -177,6 +185,11 @@ a{color:#7fb7ff}
         <option value="dg">实时逐词（Deepgram）</option>
         <option value="whisper">按句（Groq Whisper）</option>
       </select></div>
+      <div class="row"><label>收音</label><select id="micMode">
+        <option value="room">全场：学生发言、讨论也收（关掉 iPad 降噪）</option>
+        <option value="near">只听近处的人：降噪，背景人声会被压掉</option>
+      </select></div>
+      <div class="row"><label>区分说话人</label><input type="checkbox" id="diarize" style="width:20px;height:20px"><span class="hint">实时字幕换人时另起一行，标"说话人 1/2…"（只对实时识别有效）</span></div>
       <div class="row"><label>Deepgram 模型</label><input type="text" id="dgModel"></div>
       <div class="row"><label>Whisper 模型</label><input type="text" id="asrModel"></div>
       <div class="row"><label>灵敏度</label><input type="range" id="sens" min="1" max="5" step="1"><span id="sensV" class="hint"></span></div>
@@ -288,7 +301,7 @@ const PROVIDERS = [
 
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
-  asrEngine:'auto', dgModel:'nova-3', asrModel:'whisper-large-v3',
+  asrEngine:'auto', dgModel:'nova-3', asrModel:'whisper-large-v3', micMode:'room', diarize:true,
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
   showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3, keepDays:30,
@@ -303,7 +316,7 @@ function loadSettings(){
   S.models = Object.assign({}, saved.models || {});
 }
 // 这些跟着账号走，云同步；字号、中文亮度等显示设置每台设备各自保存
-const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'models', 'enabled', 'glossary', 'sensitivity'];
+const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'micMode', 'diarize', 'models', 'enabled', 'glossary', 'sensitivity'];
 const syncPart = () => JSON.stringify(SYNC_KEYS.map(k => S[k]));
 let lastSyncPart = '';
 function saveSettings(){
@@ -486,13 +499,16 @@ Translate the numbered English lines (speech-recognition output) into natural, c
 - Keep numbers, units, model names and code references (e.g. B149.1) as written.
 - Output ONLY the translations, one per line, in the format "[n] 译文", same numbering. No notes, no extra text.`;
 
+// 存疑的词（⟦…⟧，识别自己都删掉了的）不拿去翻译，免得译出乱七八糟的东西
+const sureText = s => (s || '').replace(/⟦[^⟧]*⟧?/g, ' ').replace(/\s+/g, ' ').trim();
 function buildUser(items, context){
-  const text = items.map(i => i.en).join(' ');
-  const gl = glossaryFor(text + ' ' + context.join(' '));
+  const ens = items.map(i => sureText(i.en) || '…');
+  context = context.map(sureText);
+  const gl = glossaryFor(ens.join(' ') + ' ' + context.join(' '));
   let u = '';
   if (gl.length) u += 'Glossary:\n' + gl.map(g => `- ${g.en} = ${g.zh}`).join('\n') + '\n\n';
   if (context.length) u += 'Previous context (do NOT translate):\n' + context.join('\n') + '\n\n';
-  u += 'Translate:\n' + items.map((it, k) => `[${k+1}] ${it.en}`).join('\n');
+  u += 'Translate:\n' + ens.map((en, k) => `[${k+1}] ${en}`).join('\n');
   return u;
 }
 
@@ -714,11 +730,14 @@ async function start(){
   if (engine === 'whisper' && !S.keys.groq.trim()){ toast('先在设置里填 Deepgram key（实时）或 Groq key（按句）'); openPanel('#pSettings'); return; }
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:true, autoGainControl:true, channelCount:1}});
+    // 全场：关掉 iPad 的降噪和自动增益（它们是给打电话设计的，会把离得远的人声当噪声压掉）
+    const room = S.micMode !== 'near';
+    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:!room, autoGainControl:!room, channelCount:1}});
   } catch(e){ toast('拿不到麦克风权限：' + e.message); return; }
   const track = stream.getAudioTracks()[0];
   const ts = (track && track.getSettings && track.getSettings()) || {};
-  log(`麦克风：${track ? track.label || '默认' : '?'}，采样率 ${ts.sampleRate || '未知'}，${ts.channelCount || '?'} 声道`);
+  log(`麦克风：${track ? track.label || '默认' : '?'}，采样率 ${ts.sampleRate || '未知'}，${ts.channelCount || '?'} 声道，`
+    + `${S.micMode !== 'near' ? '全场' : '只听近处'}（降噪${ts.noiseSuppression === undefined ? '?' : ts.noiseSuppression ? '开' : '关'}，自动增益${ts.autoGainControl === undefined ? '?' : ts.autoGainControl ? '开' : '关'}）`);
 
   Object.assign(L, {stream, ctx:null, micRate:ts.sampleRate || 0, frames:0, seg:null, hist:[], lines:[], nextId:1, save:$('#togSave').checked, hidden:false,
     wall0:0, pausedMs:0, pausedAt:0, capRatios:{}, capFinal:false});
@@ -846,6 +865,7 @@ const DG = {
   url(){
     const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:'en', encoding:'linear16', sample_rate:'16000', channels:'1',
       interim_results:'true', smart_format:'true', punctuate:'true', endpointing:'300', utterance_end_ms:'1000', vad_events:'true'});
+    if (S.diarize) p.set('diarize', 'true');   // 每个词标上是第几个说话人
     if (/^nova-3/.test(p.get('model'))) parseGlossary().slice(0, 80).forEach(g => p.append('keyterm', g.en));   // 术语表帮助识别专业词（nova-3 才支持）
     return 'wss://api.deepgram.com/v1/listen?' + p;
   },
@@ -928,24 +948,47 @@ const DG = {
     if (m.type !== 'Results') return;
     const alt = m.channel && m.channel.alternatives && m.channel.alternatives[0];
     const tx = ((alt && alt.transcript) || '').trim();
-    let words = ((alt && alt.words) || []).map(w => ({w:w.punctuated_word || w.word, s:this.realT(w.start)}));
-    if (tx && !words.length) words = [{w:tx, s:this.realT(m.start || 0)}];
-    if (m.is_final){ const fe = this.realT((m.start || 0) + (m.duration || 0)); if (fe > this.confirmed) this.confirmed = fe; }
-    if (tx && !this.cur) this.newLine(words[0].s);
+    let words = ((alt && alt.words) || []).map(w => ({w:w.punctuated_word || w.word, s:this.realT(w.start), e:this.realT(w.end), spk:w.speaker}));
+    if (tx && !words.length) words = [{w:tx, s:this.realT(m.start || 0), e:this.realT((m.start || 0) + (m.duration || 0))}];
+    if (!m.is_final){
+      if (tx && !this.cur) this.newLine(words[0].s, S.diarize ? words[0].spk : undefined);
+      if (!this.cur) return;
+      this.cur.im = words; this.cur.line.im = words.map(w => w.w).join(' ');
+      renderLine(this.cur.line);
+      return;
+    }
+    // ---- 定稿 ----
+    const fs = this.realT(m.start || 0), fe = this.realT((m.start || 0) + (m.duration || 0));
+    if (fe > this.confirmed) this.confirmed = fe;
+    // C：这段里刚才显示过、定稿却删掉的词，不让它凭空消失，留成淡色的"存疑"（⟦…⟧ 包起来）
+    const prev = this.cur ? this.cur.im.filter(w => w.s >= fs - 0.05 && w.s < fe) : [];
+    // 同一个词：开始时间差不多，或者开始时间落在定稿某个词的中间
+    const dropped = prev.filter(p => !words.some(k => Math.abs(k.s - p.s) < 0.12 || (p.s >= k.s && p.s < k.e - 0.05)));
+    const all = words.map(w => ({...w, doubt:false})).concat(dropped.map(w => ({...w, doubt:true, spk:undefined}))).sort((a, b) => a.s - b.s);
+    // D：按说话人分段，换人就另起一行
+    for (const w of all){
+      const spk = S.diarize && !w.doubt ? w.spk : undefined;
+      if (!this.cur) this.newLine(w.s, spk);
+      const c = this.cur;
+      if (spk !== undefined && c.line.spk !== undefined && spk !== c.line.spk && c.line.en){
+        const keep = c.im; c.im = []; this.endLine(); this.newLine(w.s, spk); this.cur.im = keep;
+      } else if (spk !== undefined && c.line.spk === undefined) c.line.spk = spk;
+      const line = this.cur.line;
+      const piece = w.doubt ? '⟦' + w.w + '⟧' : w.w;
+      line.en = line.en ? (w.doubt && /⟧$/.test(line.en) ? line.en.slice(0, -1) + ' ' + w.w + '⟧' : line.en + ' ' + piece) : piece;
+    }
+    if (dropped.length) log(`识别删掉了 ${dropped.length} 个词，留成存疑：${dropped.map(w => w.w).join(' ')}`);
     const c = this.cur; if (!c) return;
-    if (m.is_final){
-      if (tx) c.line.en = (c.line.en ? c.line.en + ' ' : '') + tx;
-      c.im = c.im.filter(w => w.s >= this.confirmed - 0.02);   // 定稿范围之后的灰字留着，不闪
-    } else c.im = words;
+    c.im = c.im.filter(w => w.s >= this.confirmed - 0.02);   // 定稿范围之后的灰字留着，不闪
     c.line.im = c.im.map(w => w.w).join(' ');
     renderLine(c.line);
-    if (!m.is_final) return;
     // 断行只看句子：句号/问号/叹号结尾（至少 4 个词），或者太长了
     const n = c.line.en.split(/\s+/).filter(Boolean).length;
-    if ((/[.?!]["')\]]?$/.test(c.line.en) && n >= 4) || n >= 40 || (n && this.confirmed - c.line.t > 25 && m.speech_final)) this.endLine('carry');
+    if ((/[.?!]["')\]]?⟧?$/.test(c.line.en) && n >= 4) || n >= 40 || (n && this.confirmed - c.line.t > 25 && m.speech_final)) this.endLine('carry');
   },
-  newLine(t){
+  newLine(t, spk){
     const line = {id:L.nextId++, t, en:'', im:'', zh:'', status:'live'};
+    if (spk !== undefined) line.spk = spk;
     L.lines.push(line); this.cur = {line, im:[]};
   },
   // carry：下一句已经冒出来的灰字挪到新的一行；flush：连接要结束了，灰字也当定稿
@@ -1097,7 +1140,7 @@ async function runTr(){
 const dirtyTimers = new Map();
 function dirty(sess, lines){
   if (!sess) return;
-  sess.lines = lines.map(l => ({t:l.t, en:l.en, zh:l.zh}));
+  sess.lines = lines.map(l => l.spk === undefined ? {t:l.t, en:l.en, zh:l.zh} : {t:l.t, en:l.en, zh:l.zh, spk:l.spk});
   if (dirtyTimers.has(sess.id)) return;
   dirtyTimers.set(sess.id, setTimeout(() => { dirtyTimers.delete(sess.id); persistNow(sess); }, 3000));
 }
@@ -1302,7 +1345,8 @@ const Cloud = {
     // 历史记录：一节课一个文件，谁新用谁的（录音在下面单独传）
     const local = (await DB.allSessions()) || [];
     const localIds = new Set(local.map(s => s.id));
-    const pack = s => ({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], updatedAt:s.updatedAt || 0});
+    const pack = s => Object.assign({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], updatedAt:s.updatedAt || 0},
+      s.refined ? {refined:s.refined, liveLines:s.liveLines} : {});
     for (const s0 of local){
       const live = L.state !== 'idle' && L.session && L.session.id === s0.id;
       const s = live ? L.session : s0;
@@ -1459,18 +1503,23 @@ $('#btnCloudOff').onclick = () => { if (confirm('关闭云同步？本机数据�
 /* ================= rendering ================= */
 let stick = true;
 const splitW = s => (s || '').split(/\s+/).filter(Boolean);
+// 说话人：Deepgram 从 0 开始编号，显示成"说话人 1、2…"
+const spkName = s => s === undefined || s === null ? '' : '说话人 ' + (s + 1);
+const spkTag = s => spkName(s) ? `<span class="spk spk${s % 6}">${spkName(s)}</span>` : '';
+// 英文：⟦…⟧ 里是识别删掉的存疑词，显示成淡色斜体
+const enMarkup = t => esc(t || '').replace(/⟦([^⟧]*)(⟧|$)/g, '<span class="doubt">$1</span>');
 // l.shown：已经"打"出来几个词（没有这个字段就是全部显示）
 function enHtml(l){
   if (l.status === 'asr') return '识别中…';
   const fin = splitW(l.en), im = l.status === 'live' ? splitW(l.im) : [];
   const total = fin.length + im.length, k = l.shown == null ? total : Math.min(l.shown, total);
   const a = fin.slice(0, k), b = im.slice(0, Math.max(0, k - fin.length));
-  return esc(a.join(' ')) + (b.length ? (a.length ? ' ' : '') + '<span class="im">' + esc(b.join(' ')) + '</span>' : '')
+  return enMarkup(a.join(' ')) + (b.length ? (a.length ? ' ' : '') + '<span class="im">' + esc(b.join(' ')) + '</span>' : '')
     + (l.status === 'live' || k < total ? '<span class="caret"></span>' : '');
 }
 function lineHtml(l){
   const zh = l.status === 'tr' ? '翻译中…' : (l.status === 'asr' || l.status === 'live') ? '' : l.zh;
-  return `<div class="t">${fmtT(l.t)}</div><div class="en">${enHtml(l)}</div><div class="zh">${esc(zh)}</div>`;
+  return `<div class="t">${fmtT(l.t)}${spkTag(l.spk)}</div><div class="en">${enHtml(l)}</div><div class="zh">${esc(zh)}</div>`;
 }
 function paintLine(l){
   const box = $('#subs');
@@ -1675,6 +1724,158 @@ async function mergeToMp3(sess, onProg){
   return {blob:new Blob(out, {type:'audio/mpeg'}), dur:total / MP3_RATE};
 }
 
+/* ================= 课后精修（手动点才做） =================
+   整节课录音重新识别一遍：优先 Deepgram 离线识别（看得到前后文，漏得少，区分说话人）；
+   没有 Deepgram key 或它失败了，用 Groq Whisper（免费，不分说话人）。再按句子、带前文重新翻译。
+   原来的实时字幕存成 liveLines，可以切回去看 */
+const REFINE = {sid:null, stage:'', pct:0};
+// 一串带时间、说话人的词 → 按说话人和句号断成行
+function wordsToLines(words){
+  const lines = []; let cur = null;
+  for (const w of words){
+    const text = w.punctuated_word || w.word, spk = w.speaker;
+    if (!text) continue;
+    if (!cur || (spk !== undefined && spk !== cur.spk) || w.start - cur.end > 2){ cur = {t:w.start, en:'', spk, end:w.end, n:0}; lines.push(cur); }
+    cur.en = cur.en ? cur.en + ' ' + text : text; cur.end = w.end; cur.n++;
+    if ((/[.?!]["')\]]?$/.test(text) && cur.n >= 4) || cur.n >= 40) cur = null;
+  }
+  return lines.map(l => l.spk === undefined ? {t:l.t, en:l.en, zh:''} : {t:l.t, en:l.en, zh:'', spk:l.spk});
+}
+async function refineDeepgram(blob){
+  const p = new URLSearchParams({model:(S.dgModel || 'nova-3').trim(), language:'en', smart_format:'true', punctuate:'true', diarize:'true', utterances:'true'});
+  if (/^nova-3/.test(p.get('model'))) parseGlossary().slice(0, 100).forEach(g => p.append('keyterm', g.en));
+  const res = await fetchT('https://api.deepgram.com/v1/listen?' + p, {method:'POST', headers:{Authorization:'Token ' + S.keys.dg.trim(), 'Content-Type':blob.type || 'audio/mpeg'}, body:blob}, 15 * 60e3);
+  if (!res.ok) throw await httpErr(res);
+  const j = await res.json(), r = j.results || {};
+  const utts = r.utterances || [];
+  const words = utts.length ? utts.flatMap(u => (u.words || []).map(w => Object.assign({}, w, {speaker:w.speaker ?? u.speaker})))
+    : ((((r.channels || [])[0] || {}).alternatives || [{}])[0].words || []);
+  return wordsToLines(words);
+}
+// Groq Whisper：一次最多 25MB，大的 MP3 按字节切成 15MB 一块（MP3 每块都能单独解码），按块的起点换算时间
+async function whisperFile(blob){
+  for (let attempt = 0; attempt < 5; attempt++){
+    const fd = new FormData();
+    fd.append('file', blob, 'audio' + (blob.type.includes('mpeg') ? '.mp3' : blob.type.includes('webm') ? '.webm' : '.m4a'));
+    fd.append('model', S.asrModel.trim() || 'whisper-large-v3'); fd.append('language', 'en');
+    fd.append('response_format', 'verbose_json'); fd.append('temperature', '0');
+    const prompt = whisperPrompt(''); if (prompt) fd.append('prompt', prompt);
+    try {
+      const res = await fetchT('https://api.groq.com/openai/v1/audio/transcriptions', {method:'POST', headers:{Authorization:'Bearer ' + S.keys.groq.trim()}, body:fd}, 10 * 60e3);
+      if (!res.ok) throw await httpErr(res);
+      const j = await res.json();
+      return (j.segments || []).filter(s => !(s.no_speech_prob > 0.6 && s.avg_logprob < -0.8) && !(s.compression_ratio > 2.6));
+    } catch(e){
+      if ([400, 401, 403, 413].includes(e.status)) throw e;
+      const wait = Math.min(e.retryAfter || (e.status === 429 ? 30000 : 5000), 180000);
+      log(`精修：Whisper ${e.status === 429 ? '限流' : '出错'}，${Math.ceil(wait / 1000)} 秒后重试`);
+      await sleep(wait);
+    }
+  }
+  throw new Error('Whisper 多次失败');
+}
+async function refineWhisper(sess, segs, onProg){
+  const units = [];
+  for (const g of segs){
+    const blob = await segBlob(sess, g);
+    if (blob.size <= 20e6 || !/mpeg/.test(g.mime)) units.push({blob, t0:g.t0});
+    else { const bps = MP3_KBPS * 1000 / 8; for (let o = 0; o < blob.size; o += 15e6) units.push({blob:blob.slice(o, o + 15e6, 'audio/mpeg'), t0:g.t0 + o / bps}); }
+  }
+  const lines = [];
+  for (let i = 0; i < units.length; i++){
+    for (const s of await whisperFile(units[i].blob)) lines.push({t:units[i].t0 + s.start, en:(s.text || '').trim(), zh:''});
+    onProg((i + 1) / units.length);
+  }
+  return lines.filter(l => l.en && !HALLU.test(l.en));
+}
+async function refineSession(sid){
+  if (REFINE.sid) return;
+  REFINE.sid = sid;   // 马上占住，连点两下也只跑一次
+  let sess = await DB.getSession(sid); if (!sess){ REFINE.sid = null; return; }
+  const set = (stage, pct) => { REFINE.stage = stage; REFINE.pct = pct; refineShow(); };
+  try {
+    // 上次识别完了、翻译没做完，就接着翻
+    let lines = sess.refined && (sess.lines || []).some(l => !l.zh) ? sess.lines : null;
+    if (!lines){
+      const segs = (sess.segs || []).slice().sort((a, b) => a.t0 - b.t0);
+      if (!segs.length) throw new Error('这节没有录音');
+      let by = '';
+      if (S.keys.dg.trim()){
+        try {
+          set('准备录音…', 0.02);
+          const blob = segs.length === 1 ? await segBlob(sess, segs[0]) : (await mergeToMp3(sess, p => set(`合成录音 ${Math.round(p * 100)}%`, p * 0.1))).blob;
+          set('Deepgram 识别中，1 小时的课大约要一两分钟…', 0.12);
+          lines = await refineDeepgram(blob); by = 'Deepgram';
+        } catch(e){
+          if (!S.keys.groq.trim()) throw e;
+          log('精修：Deepgram 没成功（' + netMsg(e).slice(0, 120) + '），改用 Groq Whisper'); lines = null;
+        }
+      }
+      if (!lines){
+        if (!S.keys.groq.trim()) throw new Error('要先在设置里填 Deepgram 或 Groq 的 key');
+        lines = await refineWhisper(sess, segs, p => set(`Whisper 识别中 ${Math.round(p * 100)}%`, 0.12 + p * 0.38)); by = 'Groq Whisper';
+      }
+      if (!lines.length) throw new Error('没识别出内容');
+      sess = await DB.getSession(sid); if (!sess) throw new Error('这节课已经删了');
+      if (!sess.liveLines) sess.liveLines = sess.lines;   // 实时版留一份
+      sess.lines = lines;
+      sess.refined = {at:Date.now(), by, speakers:new Set(lines.filter(l => l.spk !== undefined).map(l => l.spk)).size};
+      await DB.putSession(sess);
+      log(`精修：${by} 识别出 ${lines.length} 句` + (sess.refined.speakers ? `，${sess.refined.speakers} 位说话人` : ''));
+      if (curSess && curSess.id === sid){ curSess = sess; P.view = 'refined'; renderSessLines(); }
+    }
+    // 重新翻译：8 句一批，带前 3 句当上下文；已经翻好的跳过
+    const todo = lines.map((l, i) => i).filter(i => !lines[i].zh);
+    for (let k = 0; k < todo.length; k += 8){
+      const idx = todo.slice(k, k + 8), items = idx.map(i => lines[i]);
+      const ctx = lines.slice(Math.max(0, idx[0] - 3), idx[0]).map(l => l.en);
+      let out;
+      for (let tries = 0; ; tries++){
+        try { out = await translateWithFallback(SYS_PROMPT, buildUser(items, ctx)); break; }
+        catch(e){ if (tries >= 5) throw e; set('翻译模型都在限流，等一会儿再继续…', REFINE.pct); await sleep(15000); }
+      }
+      const zh = parseNumbered(out, items.length);
+      items.forEach((l, j) => { l.zh = zh[j] || '（漏译）'; });
+      set(`重新翻译 ${Math.min(k + 8, todo.length)}/${todo.length}`, 0.5 + 0.5 * Math.min(1, (k + 8) / todo.length));
+      if ((k / 8) % 5 === 4 || k + 8 >= todo.length){   // 每 40 句存一次，中途关掉也不白翻
+        sess = await DB.getSession(sid); if (!sess) throw new Error('这节课已经删了');
+        sess.lines = lines; await DB.putSession(sess);
+        if (curSess && curSess.id === sid){ curSess = sess; renderSessLines(); }
+      }
+    }
+    toast(`「${sess.title}」精修好了`); log('精修完成：' + sess.title);
+  } catch(e){ toast('精修没完成：' + e.message, 7000); log('精修：' + e.message); }
+  finally {
+    REFINE.sid = null;
+    if (curSess && curSess.id === sid){ curSess = (await DB.getSession(sid)) || curSess; renderSessLines(); }
+    refineShow();
+  }
+}
+function refineShow(){
+  if (!curSess) return;
+  const b = $('#btnRefine'), info = $('#refineInfo'), v = $('#btnLiveVer'), busy = REFINE.sid === curSess.id, r = curSess.refined;
+  b.disabled = !!REFINE.sid || !(curSess.segs || []).length;
+  b.textContent = busy ? `精修中 ${Math.round(REFINE.pct * 100)}%` : r ? ((curSess.lines || []).some(l => !l.zh) ? '继续精修翻译' : '重新精修') : '精修';
+  info.textContent = busy ? REFINE.stage
+    : REFINE.sid ? '另一节课正在精修，完成后才能精修这节。'
+    : r ? `已精修（${r.by}${r.speakers ? '，' + r.speakers + ' 位说话人' : ''}，${new Date(r.at).toLocaleString()}）。` + (curSess.liveLines ? '原来的实时字幕还在，点"看实时版"切换。' : '')
+    : !(curSess.segs || []).length ? '这节没有录音，不能精修。'
+    : '精修：把整节课录音重新识别一遍（更全、区分说话人），再结合上下文重新翻译。需要时才点，会用一点 Deepgram 额度。';
+  v.style.display = curSess.liveLines ? '' : 'none';
+  v.textContent = P.view === 'live' ? '看精修版' : '看实时版';
+}
+$('#btnRefine').onclick = () => {
+  if (!curSess || REFINE.sid) return;
+  if (L.state !== 'idle'){ toast('正在录课，下课后再精修'); return; }
+  const min = Math.max(1, Math.round((curSess.duration || 0) / 60)), dg = !!S.keys.dg.trim();
+  const resume = curSess.refined && (curSess.lines || []).some(l => !l.zh);
+  const msg = resume ? '上次精修的翻译没做完，接着翻译？'
+    : `精修「${curSess.title}」：用 ${dg ? 'Deepgram（区分说话人）' : 'Groq Whisper（免费，不区分说话人）'}把 ${min} 分钟录音重新识别，再重新翻译。`
+      + (dg ? `大约用掉 Deepgram 额度 ${(min * 0.006).toFixed(2)} 美元。` : '') + '原来的实时字幕会留一份，可以切回去看。页面要开着直到完成。';
+  if (confirm(msg)) refineSession(curSess.id);
+};
+$('#btnLiveVer').onclick = () => { P.view = P.view === 'live' ? 'refined' : 'live'; renderSessLines(); refineShow(); };
+
 async function plAt(t, play = true){
   const segs = P.segs; if (!segs.length) return;
   let i = segs.findIndex(s => t < s.t0 + s.dur); if (i < 0) i = segs.length - 1;
@@ -1725,16 +1926,23 @@ async function openSession(id){
   const ownHere = !curSess.device || curSess.device === DEVICE_ID;
   $('#sessHint').textContent = segs.length ? '点任意一句，录音跳到那里播放。' + (ownHere ? '' : '录音在云端，第一次播放要下载。')
     : (ownHere ? '这节没有录音。' : '这节在另一台设备上录的，那台设备还没把录音传上云端。');
+  P.view = 'refined';
+  renderSessLines(); refineShow();
+  openPanel('#pSession');
+}
+// 一节课的字幕列表（精修过的可以切换看实时版）
+function renderSessLines(){
+  if (!curSess) return;
+  const lines = P.view === 'live' && curSess.liveLines ? curSess.liveLines : (curSess.lines || []);
   const box = $('#sessLines');
-  box.innerHTML = (curSess.lines || []).map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}</div><div class="en">${esc(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
+  box.innerHTML = lines.map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}${spkTag(l.spk)}</div><div class="en">${enMarkup(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
   box.querySelectorAll('.line').forEach(el => el.onclick = () => {
     if (!P.segs.length) return;
-    const l = curSess.lines[+el.dataset.i];
+    const l = lines[+el.dataset.i];
     box.querySelectorAll('.playing').forEach(x => x.classList.remove('playing')); el.classList.add('playing');
     plUnlock();
     plAt(Math.max(0, l.t - 0.3));
   });
-  openPanel('#pSession');
 }
 $('#btnRename').onclick = async () => {
   if (!curSess) return;
@@ -1762,7 +1970,8 @@ async function shareOrDownload(blob, filename){
 // 文字记录（导出和 Drive 文件夹里的"文字记录.txt"用同一个格式）
 function sessionText(s){
   const head = `${s.title}\n${new Date(s.createdAt).toLocaleString()}  时长 ${fmtT(s.duration || 0)}\n\n`;
-  return head + (s.lines || []).map(l => `[${fmtT(l.t)}] ${l.en}\n${l.zh || ''}\n`).join('\n');
+  const plain = t => (t || '').replace(/⟦([^⟧]*)⟧?/g, '($1?)');   // 存疑的词写成 (xxx?)
+  return head + (s.lines || []).map(l => `[${fmtT(l.t)}] ${spkName(l.spk) ? spkName(l.spk) + '：' : ''}${plain(l.en)}\n${l.zh || ''}\n`).join('\n');
 }
 $('#btnExportTxt').onclick = () => {
   if (!curSess) return;
@@ -1804,7 +2013,7 @@ function shareDownload(blob, filename){
 /* settings */
 function fillSettings(){
   $('#kDg').value = S.keys.dg; $('#kGroq').value = S.keys.groq; $('#kGemini').value = S.keys.gemini; $('#kSf').value = S.keys.sf;
-  $('#asrEngine').value = S.asrEngine; $('#dgModel').value = S.dgModel; $('#asrModel').value = S.asrModel; $('#sens').value = S.sensitivity; $('#sensV').textContent = S.sensitivity;
+  $('#asrEngine').value = S.asrEngine; $('#micMode').value = S.micMode; $('#diarize').checked = !!S.diarize; $('#dgModel').value = S.dgModel; $('#asrModel').value = S.asrModel; $('#sens').value = S.sensitivity; $('#sensV').textContent = S.sensitivity;
   $('#glossary').value = S.glossary;
   $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
   $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
@@ -1830,7 +2039,9 @@ function fillSettings(){
 }
 const bindKey = (sel, k) => $(sel).onchange = () => { S.keys[k] = $(sel).value.trim(); Object.keys(cooldown).forEach(x => cooldown[x] = 0); saveSettings(); };
 bindKey('#kDg', 'dg'); bindKey('#kGroq', 'groq'); bindKey('#kGemini', 'gemini'); bindKey('#kSf', 'sf');
-$('#asrEngine').onchange = () => { S.asrEngine = $('#asrEngine').value; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
+$('#micMode').onchange = () => { S.micMode = $('#micMode').value; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
+$('#diarize').onchange = () => { S.diarize = $('#diarize').checked; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
+$('#asrEngine').onchange =() => { S.asrEngine = $('#asrEngine').value; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
 $('#keepDays').onchange = () => { const v = Math.round(+$('#keepDays').value); S.keepDays = isFinite(v) && v >= 0 ? v : 30; $('#keepDays').value = S.keepDays; saveSettings(); Cloud.schedule(1000); };
 $('#dgModel').onchange =() => { S.dgModel = $('#dgModel').value.trim() || 'nova-3'; saveSettings(); };
 document.querySelectorAll('.eye').forEach(b => b.onclick = () => {
