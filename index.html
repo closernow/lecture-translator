@@ -741,7 +741,9 @@ async function buildCapture(i){
   } catch(e){ log(`采音：${m.name} 不可用（${e.message}）`); ctx.close().catch(() => {}); return false; }
   const src = ctx.createMediaStreamSource(L.stream), sink = ctx.createGain();
   sink.gain.value = 0;
-  src.connect(proc); proc.connect(sink); sink.connect(ctx.destination);
+  // 低音过滤：去掉 100Hz 以下的轰隆声（空旷场地的回声、脚步、空调低鸣），人声基本在这之上，不受影响
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 100; hp.Q.value = 0.707;
+  src.connect(hp); hp.connect(proc); proc.connect(sink); sink.connect(ctx.destination);
   // iPad 有时会把音频挂起（来电、别的 App 占用麦克风），记下来并尽量自动恢复
   ctx.onstatechange = () => {
     if (ctx.state === 'closed') return;   // 结束时正常关闭，不用记
@@ -812,8 +814,14 @@ function capTick(){
   if (L.zeroRun >= 5 && now - (L.fixAt || 0) > 20000){ L.fixAt = now; micFix(); }
   // 明显有人在说话，Deepgram 却 30 秒一个词都没回：连接多半卡住了，重连（没定稿的声音会重发）
   if (L.engine === 'dg' && DG.ws && DG.ws.readyState === 1 && L.loudNoWord >= 15 && realNow() - DG.lastWordAt > 30 && now - (DG.kickAt || 0) > 60000){
-    log(`Deepgram：${Math.round(realNow() - DG.lastWordAt)} 秒里有 ${Math.round(L.loudNoWord)} 秒明显有声音，却一个词都没回，重连`);
-    DG.kickAt = now; L.loudNoWord = 0; DG.lost();
+    // 4 分钟里第二次了：多半是场地回声太大 Deepgram 认不出（实测 Whisper 在这种地方认得出），这节课改用 Whisper 按句识别
+    DG.kicks = (DG.kicks || []).filter(x => now - x < 240000).concat(now);
+    if (DG.kicks.length >= 2 && S.keys.groq.trim()){
+      DG.toWhisper(`Deepgram 4 分钟里两次明显有声音却不出字（可能回声太大），这节课改用 Groq Whisper 按句识别`);
+    } else {
+      log(`Deepgram：${Math.round(realNow() - DG.lastWordAt)} 秒里有 ${Math.round(L.loudNoWord)} 秒明显有声音，却一个词都没回，重连`);
+      DG.kickAt = now; L.loudNoWord = 0; DG.lost();
+    }
   }
   // 每分钟概况：不正常就记一笔，正常的 5 分钟记一笔
   const M = L.mon, span = realNow() - M.t0;
@@ -1025,7 +1033,7 @@ const DG = {
   ws:null, opened:false, queue:[], sent:[], offset:null, inPos:0, cur:null, fails:0, retryAt:0, closing:false,
   confirmed:0, lastMsgAt:0, lastSendAt:0, openAt:0, dog:null,
   begin(){
-    Object.assign(this, {ws:null, queue:[], sent:[], map:[], audioPos:0, cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0, lastWordAt:0});
+    Object.assign(this, {ws:null, queue:[], sent:[], map:[], audioPos:0, cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0, lastWordAt:0, kicks:[], lastBuf:0});
     clearInterval(this.dog); this.dog = setInterval(() => this.watch(), 2000);
     this.open();
   },
@@ -1059,8 +1067,9 @@ const DG = {
   lost(){
     const ws = this.ws; this.ws = null;
     if (ws){ ws.onclose = ws.onmessage = null; try { ws.close(); } catch(e){} }
-    const back = this.sent.filter(f => f.t + f.d > this.confirmed);
-    this.sent = [];
+    let back = this.sent.filter(f => f.t + f.d > this.confirmed);
+    if (back.length) back = back.filter(f => f.t > back[back.length - 1].t - 15);   // 最多补发最近 15 秒，一下子塞太多又会堵
+    this.sent = []; this.lastBuf = 0;
     this.queue = back.concat(this.queue);
     if (this.queue.length > 400) this.queue.splice(0, this.queue.length - 400);
     // 灰字先留在屏幕上，重发的声音识别出来后会被新结果替换
@@ -1079,17 +1088,25 @@ const DG = {
     if (ws.readyState === 0 && now - this.openAt > 8000){ log('Deepgram 连接超时'); this.lost(); return; }
     if (ws.readyState !== 1) return;
     if (now - this.lastMsgAt > 10000 && now - this.lastSendAt < 3000){ log(`Deepgram ${Math.round((now - this.lastMsgAt) / 1000)} 秒没回应，重连`); this.lost(); return; }
-    if (ws.bufferedAmount > 256 * 1024){ log(`网络堵了（积压 ${Math.round(ws.bufferedAmount / 1024)}KB 没发出去），重连`); this.lost(); }
+    // 网络堵了：积压超过 256KB，而且 2 秒里没减少才算。刚重连时补发的那一大批要时间发出去，
+    // 以前一看到积压就重连，重连又补发，自己把自己困住（实测卡了 1 分钟）
+    const buf = ws.bufferedAmount, prevBuf = this.lastBuf || 0; this.lastBuf = buf;
+    if (buf > 256 * 1024 && buf >= prevBuf && now - this.openAt > 10000){ log(`网络堵了（积压 ${Math.round(buf / 1024)}KB 没发出去），重连`); this.lost(); }
   },
   failed(){
     this.fails++;
     this.retryAt = Date.now() + Math.min(2000 * this.fails, 10000);
-    if (this.fails >= 3 && S.keys.groq.trim()){
-      toast('Deepgram 连不上（检查 key 和网络），这节课先改用按句识别', 7000);
-      log('Deepgram 连续失败，改用 Groq Whisper');
-      this.endLine('flush');
-      L.engine = 'whisper'; L.seg = null; L.hist = []; this.queue = []; this.sent = []; updateProv();
-    } else if (this.fails === 3) toast('Deepgram 连不上，检查 key 和网络', 7000);
+    if (this.fails >= 3 && S.keys.groq.trim()) this.toWhisper('Deepgram 连续连不上，改用 Groq Whisper');
+    else if (this.fails === 3) toast('Deepgram 连不上，检查 key 和网络', 7000);
+  },
+  // 这节课剩下的时间改用 Groq Whisper 按句识别（字幕整句出，晚几秒）
+  toWhisper(why){
+    log(why); toast(why.replace('Groq Whisper 按句识别', 'Whisper 按句识别：字幕整句出，会晚几秒'), 8000);
+    this.endLine('flush');
+    const ws = this.ws; this.ws = null;
+    if (ws){ ws.onclose = ws.onmessage = null; try { ws.close(); } catch(e){} }
+    clearInterval(this.dog);
+    L.engine = 'whisper'; L.seg = null; L.hist = []; this.queue = []; this.sent = []; updateProv();
   },
   push(f, t){
     this.queue.push({t, d:f.length / L.rate, buf:toPcm16(f, L.rate)});
@@ -2027,10 +2044,12 @@ function wordsToLines(words){
     if (!cur || (spk !== undefined && spk !== cur.spk) || w.start - cur.end > 2){ cur = {t:w.start, en:'', spk, end:w.end, n:0, ws:[]}; lines.push(cur); }
     cur.en = cur.en ? cur.en + ' ' + text : text; cur.end = w.end; cur.n++;
     addWordTimes(cur, {w:text, s:w.start, e:w.end});
+    if (w.est) cur.est = true;
     addLang(cur, w.language);
     if ((SENT_END.test(text) && cur.n >= 4) || cur.n >= 40) cur = null;
   }
-  return lines.map(l => Object.assign({t:l.t, en:l.en, zh:'', ws:l.ws}, l.spk === undefined ? {} : {spk:l.spk}, l.lang ? {lang:l.lang} : {}));
+  // 含估算时间的句子不存逐词时间：回放时只高亮整句，不逐词跳
+  return lines.map(l => Object.assign({t:l.t, en:l.en, zh:''}, l.est ? {} : {ws:l.ws}, l.spk === undefined ? {} : {spk:l.spk}, l.lang ? {lang:l.lang} : {}));
 }
 // Deepgram 离线识别一个文件 → 带时间、说话人的词（用完整的逐词结果，不用它整理过的分段，免得分段漏了词也跟着漏）
 async function dgWords(blob){
@@ -2067,13 +2086,28 @@ async function dgRange(blob, a, b){
   }
   return out;
 }
-// Whisper 补一段：它只给句子级时间，把句子里的词按顺序平分这句的时长
+// Whisper 识别 [a, b] 这一段：也按 10 分钟一块（一次太长它会跳段、时间漂移），每块重叠 4 秒，只要落在 [a, b) 里的。
+// 要逐词时间（Whisper 的词不带标点），再按顺序对到句子的词上（句子带标点，好断句）；
+// 万一没给逐词时间，就把这句的时长平分给每个词，标成估算（est），回放时只高亮整句
 async function whisperRange(blob, a, b){
   const out = [];
-  for (const sg of await whisperFile(mp3Slice(blob, a, b))){
-    const text = (sg.text || '').trim(); if (!text || HALLU.test(text)) continue;
-    const toks = splitW(text), s0 = a + sg.start, d = Math.max(0.1, (sg.end - sg.start) / toks.length);
-    toks.forEach((t, k) => { if (s0 + k * d < b) out.push({word:t, punctuated_word:t, start:s0 + k * d, end:s0 + (k + 1) * d}); });
+  for (let s = a; s < b; s += 600){
+    const e = Math.min(b, s + 600), from = Math.max(0, s - 2);
+    const r = await whisperFile(mp3Slice(blob, from, e + 2), true);
+    let wi = 0;
+    for (const sg of r.segs){
+      const toks = splitW((sg.text || '').trim()); if (!toks.length) continue;
+      while (wi < r.words.length && r.words[wi].start < sg.start - 0.3) wi++;
+      const inSeg = []; for (let j = wi; j < r.words.length && r.words[j].start < sg.end + 0.3; j++) inSeg.push(r.words[j]);
+      wi += inSeg.length;
+      const d = Math.max(0.1, (sg.end - sg.start) / toks.length);
+      toks.forEach((t, k) => {
+        // 词数一样就一一对上；不一样就按位置取最近的那个词的时间
+        const w = inSeg.length ? inSeg[inSeg.length === toks.length ? k : Math.round(k * (inSeg.length - 1) / Math.max(1, toks.length - 1))] : null;
+        const st = from + (w ? w.start : sg.start + k * d), en = from + (w ? w.end : sg.start + (k + 1) * d);
+        if (st >= s && st < e) out.push(Object.assign({word:t, punctuated_word:t, start:st, end:en}, w ? {} : {est:true}));
+      });
+    }
   }
   return out;
 }
@@ -2108,19 +2142,37 @@ async function refineDeepgram(blob, set){
   }
   return wordsToLines(words);
 }
-// Groq Whisper：一次最多 25MB，大的 MP3 按字节切成 15MB 一块（MP3 每块都能单独解码），按块的起点换算时间
-async function whisperFile(blob){
+// Whisper 瞎编的句子：没人说话、在唱歌放音乐的地方，它常编出"Thank you very much."这类短句，一句摊在十几二十秒上。
+// 有逐词时间时看每个词被拉得多长（真说话一个词不到 1 秒，瞎编的一个词能摊好几秒）；
+// 没有逐词时间就看短句（≤5 个词）占没占 8 秒以上；常见的瞎编句占 3 秒以上也丢
+function whisperFake(s, words){
+  const t = (s.text || '').trim(), n = splitW(t).length, d = s.end - s.start;
+  if (!n || HALLU.test(t)) return true;
+  if (/^(thank you( (very|so) much)?|thanks( (a lot|for watching))?|please subscribe.*)[.!]*$/i.test(t) && d > 3) return true;
+  const ws = words.filter(w => w.start >= s.start - 0.3 && w.start < s.end + 0.3);
+  if (ws.length) return ws.reduce((a, w) => a + (w.end - w.start), 0) / ws.length > 1.5;
+  return n <= 5 && d > 8;
+}
+// Groq Whisper：一次最多 25MB；words：要不要逐词时间。返回 {segs:句子（已去掉瞎编的）, words:[{word,start,end}]}
+async function whisperFile(blob, words){
   for (let attempt = 0; attempt < 5; attempt++){
     const fd = new FormData();
     fd.append('file', blob, 'audio' + (blob.type.includes('mpeg') ? '.mp3' : blob.type.includes('webm') ? '.webm' : '.m4a'));
     fd.append('model', S.asrModel.trim() || 'whisper-large-v3'); if (!S.multiLang) fd.append('language', 'en');
     fd.append('response_format', 'verbose_json'); fd.append('temperature', '0');
+    if (words){ fd.append('timestamp_granularities[]', 'word'); fd.append('timestamp_granularities[]', 'segment'); }
     const prompt = whisperPrompt(''); if (prompt) fd.append('prompt', prompt);
     try {
       const res = await fetchT('https://api.groq.com/openai/v1/audio/transcriptions', {method:'POST', headers:{Authorization:'Bearer ' + S.keys.groq.trim()}, body:fd}, 10 * 60e3);
       if (!res.ok) throw await httpErr(res);
       const j = await res.json();
-      return (j.segments || []).filter(s => !(s.no_speech_prob > 0.6 && s.avg_logprob < -0.8) && !(s.compression_ratio > 2.6));
+      const all = j.words || [];
+      const segs = [], bad = [];
+      for (const s of j.segments || []) (!(s.no_speech_prob > 0.6 && s.avg_logprob < -0.8) && !(s.compression_ratio > 2.6) && !whisperFake(s, all) ? segs : bad).push(s);
+      if (bad.length) log(`精修：Whisper 去掉 ${bad.length} 句没人说话时瞎编的`);
+      // 逐词时间：只要落在留下的句子里、不在去掉的句子里的
+      const ws = all.filter(w => !bad.some(s => w.start >= s.start && w.start < s.end) && segs.some(s => w.start >= s.start - 0.3 && w.start < s.end + 0.3));
+      return {segs, words:ws};
     } catch(e){
       if ([400, 401, 403, 413].includes(e.status)) throw e;
       const wait = Math.min(e.retryAfter || (e.status === 429 ? 30000 : 5000), 180000);
@@ -2131,17 +2183,19 @@ async function whisperFile(blob){
   throw new Error('Whisper 多次失败');
 }
 async function refineWhisper(sess, segs, onProg){
-  const units = [];
-  // MP3 方式录的一分钟一段，先接成一整个再切大块，免得请求太多次
-  if (segs.length > 1 && segs.every(g => g.cont)) segs = [{blob:(await mergeToMp3(sess)).blob, t0:segs[0].t0, mime:'audio/mpeg'}];
-  for (const g of segs){
-    const blob = await segBlob(sess, g);
-    if (blob.size <= 20e6 || !/mpeg/.test(g.mime)) units.push({blob, t0:g.t0});
-    else { const bps = MP3_KBPS * 1000 / 8; for (let o = 0; o < blob.size; o += 15e6) units.push({blob:blob.slice(o, o + 15e6, 'audio/mpeg'), t0:g.t0 + o / bps}); }
+  // MP3 录音（整节课一个，或 MP3 方式的几段）：10 分钟一块、带逐词时间
+  if ((segs.length === 1 && /mpeg/.test(segs[0].mime)) || segs.every(g => g.cont)){
+    const blob = segs.length === 1 ? await segBlob(sess, segs[0]) : (await mergeToMp3(sess)).blob;
+    const t0 = segs[0].t0 || 0, total = blob.size / MP3_BPS, words = [];
+    for (let s = 0; s < total; s += 600){ words.push(...await whisperRange(blob, s, Math.min(total, s + 600))); onProg(Math.min(1, (s + 600) / total)); }
+    return wordsToLines(words.map(w => Object.assign(w, {start:w.start + t0, end:w.end + t0})));
   }
+  // 老的 m4a/webm 录音：整段送，只有句子级时间
+  const units = [];
+  for (const g of segs) units.push({blob:await segBlob(sess, g), t0:g.t0});
   const lines = [];
   for (let i = 0; i < units.length; i++){
-    for (const s of await whisperFile(units[i].blob)) lines.push({t:units[i].t0 + s.start, en:(s.text || '').trim(), zh:''});
+    for (const s of (await whisperFile(units[i].blob)).segs) lines.push({t:units[i].t0 + s.start, en:(s.text || '').trim(), zh:''});
     onProg((i + 1) / units.length);
   }
   return lines.filter(l => l.en && !HALLU.test(l.en));
