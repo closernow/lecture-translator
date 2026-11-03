@@ -1210,7 +1210,19 @@ const DG = {
     // 或者是同一个词、时间挪了一点（1 秒内）：定稿常把灰字的时间改一点，以前会多出一个"Once (Once?)"
     const norm = w => w.toLowerCase().replace(/[^\p{L}\p{N}']/gu, '');
     const dropped = prev.filter(p => !words.some(k => Math.abs(k.s - p.s) < 0.12 || (p.s >= k.s && p.s < k.e - 0.05) || (Math.abs(k.s - p.s) < 1 && norm(k.w) === norm(p.w))));
-    const all = words.map(w => ({...w, doubt:false})).concat(dropped.map(w => ({...w, doubt:true, spk:undefined}))).sort((a, b) => a.s - b.s);
+    // 连着 3 个词以上整串被删（中间没有定稿的词）：实测 11/2 放带背景琴声的录音，灰字整句是对的，
+    // 定稿却整串扔掉，留成存疑又不翻译，中文缺一大截。这种相信灰字，照常显示、照常翻译；零星一两个才留存疑
+    dropped.sort((a, b) => a.s - b.s);
+    const runs = [];
+    for (const p of dropped){
+      const r = runs[runs.length - 1];
+      if (r && !words.some(k => k.s > r[r.length - 1].s && k.s < p.s)) r.push(p); else runs.push([p]);
+    }
+    const kept = runs.filter(r => r.length >= 3).flat();
+    if (kept.length) this.lastWordAt = realNow();
+    if (kept.length) log(`定稿删掉了一整串灰字，照常显示：${kept.map(w => w.w).join(' ')}`);
+    const doubtful = dropped.filter(p => !kept.includes(p));
+    const all = words.map(w => ({...w, doubt:false})).concat(kept.map(w => ({...w, doubt:false})), doubtful.map(w => ({...w, doubt:true, spk:undefined}))).sort((a, b) => a.s - b.s);
     // D：按说话人分段，换人就另起一行
     for (const w of all){
       const spk = S.diarize && !w.doubt ? w.spk : undefined;
@@ -1225,7 +1237,7 @@ const DG = {
       addWordTimes(line, w);
       if (!w.doubt) addLang(line, w.lang);
     }
-    if (dropped.length) log(`识别删掉了 ${dropped.length} 个词，留成存疑：${dropped.map(w => w.w).join(' ')}`);
+    if (doubtful.length) log(`识别删掉了 ${doubtful.length} 个词，留成存疑：${doubtful.map(w => w.w).join(' ')}`);
     const c = this.cur; if (!c) return;
     c.im = c.seen = (c.seen || c.im).filter(w => w.s >= fe);   // 定稿范围之后的灰字留着，不闪
     c.line.im = c.im.map(w => w.w).join(' ');
