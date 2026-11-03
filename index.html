@@ -127,6 +127,7 @@ a{color:#7fb7ff}
   <button id="btnPause" class="big" style="display:none">暂停</button>
   <button id="btnEnd" class="big" style="display:none">结束</button>
   <button id="btnMic" class="mic" aria-label="收音模式">全场</button>
+  <button id="btnEng" class="mic" aria-label="识别方式" style="display:none">Deepgram</button>
   <span class="spacer"></span>
   <label class="tog"><input type="checkbox" id="togSave">保存</label>
   <label class="tog"><input type="checkbox" id="togZh">中文</label>
@@ -308,12 +309,17 @@ G3 = G3`;
 
 const PROVIDERS = [
   {id:'groq-gptoss', name:'gpt-oss-120b · Groq',  kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'openai/gpt-oss-120b', extra:{reasoning_effort:'low'}},
-  // -latest 是 Google 自动指向最新 Flash-Lite 的名字，旧版本下架也不用改
+  // -latest 是 Google 自动指向最新版本的名字，旧版本下架也不用改
+  // Groq 免费额度每个模型各算各的（每天 20 万 token），主力用完了换同一个 key 下的别的模型
+  {id:'groq-qwen',   name:'Qwen 3.8 27B · Groq',  kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'qwen/qwen3.8-27b', extra:{reasoning_effort:'none'}},
+  {id:'groq-oss20',  name:'gpt-oss-20b · Groq',   kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'openai/gpt-oss-20b', extra:{reasoning_effort:'low'}},
   {id:'gemini-lite', name:'Gemini Flash-Lite',    kind:'gemini', keyName:'gemini', model:'gemini-flash-lite-latest'},
+  {id:'gemini-flash',name:'Gemini Flash',         kind:'gemini', keyName:'gemini', model:'gemini-flash-latest'},
+  // Gemma 不支持单独的系统指令，说明拼进用户消息里
+  {id:'gemma',       name:'Gemma 3 27B',          kind:'gemini', keyName:'gemini', model:'gemma-3-27b-it', noSys:true},
+  // 硅基流动服务器在国内，从加拿大连过去慢，放最后
   {id:'sf-qwen8b',   name:'Qwen3-8B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'Qwen/Qwen3-8B', extra:{enable_thinking:false}},
   {id:'sf-glm',      name:'GLM-4-9B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'THUDM/GLM-4-9B-0414'},
-  {id:'groq-llama70',name:'Llama 3.3 70B · Groq', kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'llama-3.3-70b-versatile'},
-  {id:'groq-llama8', name:'Llama 3.1 8B · Groq',  kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'llama-3.1-8b-instant'},
 ];
 
 const DEFAULTS = {
@@ -571,10 +577,11 @@ async function callProvider(p, sys, user){
   const key = (S.keys[p.keyName] || '').trim();
   if (p.kind === 'gemini'){
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
-    const body = {systemInstruction:{parts:[{text:sys}]}, contents:[{role:'user', parts:[{text:user}]}],
-      generationConfig:{temperature:0.2, maxOutputTokens:1024, thinkingConfig:{thinkingBudget:0}}};
+    const body = p.noSys ? {contents:[{role:'user', parts:[{text:sys + '\n\n' + user}]}], generationConfig:{temperature:0.2, maxOutputTokens:1024}}
+      : {systemInstruction:{parts:[{text:sys}]}, contents:[{role:'user', parts:[{text:user}]}],
+        generationConfig:{temperature:0.2, maxOutputTokens:1024, thinkingConfig:{thinkingBudget:0}}};
     let res = await fetchT(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-    if (res.status === 400){ delete body.generationConfig.thinkingConfig; res = await fetchT(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); }
+    if (res.status === 400 && body.generationConfig.thinkingConfig){ delete body.generationConfig.thinkingConfig; res = await fetchT(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); }
     if (!res.ok) throw await httpErr(res);
     const j = await res.json();
     return ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).map(x => x.text || '').join('');
@@ -589,20 +596,37 @@ async function callProvider(p, sys, user){
 }
 const cleanOut = s => String(s || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 
+// 失败原因说人话：设置页模型列表和日志里用（以前日志截断在"on to…"，看不出是每分钟还是每天的额度）
+const provErr = {};
+function errWhy(e){
+  const b = e.body || '', s = e.status;
+  const m = b.match(/on (tokens|requests) per (minute|day) \((\w+)\)/i);
+  if (m) return `限流：每${/day/i.test(m[2]) ? '天' : '分钟'}${/tokens/i.test(m[1]) ? '字数' : '次数'}用完（${m[3]}）`;
+  if (s === 429) return /per.?day|daily|RPD|TPD/i.test(b) ? '限流：每天额度用完' : '限流';
+  if (s === 404) return '模型不存在（下架了？）';
+  if (s === 401 || s === 403) return 'key 不对或没权限';
+  if (s === 400) return '参数不对';
+  return netMsg(e).slice(0, 60);
+}
+// 全部模型都在冷却（不是真出错）：翻译队列等到最早恢复的那个，句子不算失败
+const coolLeft = () => Math.min(...PROVIDERS.filter(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim()).map(p => (cooldown[p.id] || 0) - Date.now()));
+
 async function translateWithFallback(sys, user){
-  let lastErr = null;
+  let lastErr = null, tried = 0;
   for (const p of PROVIDERS){
     if (!S.enabled[p.id] || !(S.keys[p.keyName] || '').trim()) continue;
     if ((cooldown[p.id] || 0) > Date.now()) continue;
+    tried++;
     const t0 = Date.now();
     try {
       const out = cleanOut(await callProvider(p, sys, user));
       if (!out) throw new Error('空结果');
       log(`翻译 ${p.name} ${((Date.now() - t0) / 1000).toFixed(1)}秒`);
-      activeProvider = p; updateProv();
+      activeProvider = p; delete provErr[p.id]; updateProv();
       return out;
     } catch(e){
-      log(`翻译失败 ${p.name} ${((Date.now() - t0) / 1000).toFixed(1)}秒：${netMsg(e).slice(0, 160)}`);
+      provErr[p.id] = errWhy(e);
+      log(`翻译失败 ${p.name} ${((Date.now() - t0) / 1000).toFixed(1)}秒：${provErr[p.id]}${e.retryAfter ? `，${Math.ceil(e.retryAfter / 1000)} 秒后再试` : ''}｜${netMsg(e).slice(0, 120)}`);
       lastErr = e;
       // 404 一般是模型下架了，6 小时内别再试；400 多半是参数问题，10 分钟
       let wait = e.retryAfter || (e.status === 429 ? 60e3 : (e.status === 401 || e.status === 403) ? 3600e3 : e.status === 404 ? 6 * 3600e3 : e.status === 400 ? 600e3 : 20e3);
@@ -611,7 +635,9 @@ async function translateWithFallback(sys, user){
       console.warn(p.name, e);
     }
   }
-  throw lastErr || new Error('没有可用的翻译模型（检查 key 和开关）');
+  if (lastErr) throw lastErr;
+  const e = new Error(tried || !isFinite(coolLeft()) ? '没有可用的翻译模型（检查 key 和开关）' : '翻译模型都在限流冷却中');
+  e.cooling = isFinite(coolLeft()); throw e;
 }
 
 function parseNumbered(out, n){
@@ -823,6 +849,15 @@ function capTick(){
       DG.kickAt = now; L.loudNoWord = 0; DG.lost();
     }
   }
+  // 自动切到 Whisper 的（可能只是在放音乐、唱歌），过一阵再试 Deepgram：5 分钟，又被切走就 10、20 分钟
+  if (L.engine === 'whisper' && L.whisperAt && !L.whisperManual && S.keys.dg.trim() &&
+      Date.now() - L.whisperAt > Math.min(20, 5 * 2 ** ((L.whisperN || 1) - 1)) * 60000){
+    DG.toDg('自动试着切回 Deepgram 实时识别');
+  }
+  // 背景声水平：最近 30 秒里较安静的那部分（第 15 百分位）。讲课有词句间的停顿，这个值低；
+  // 一直响的风机声、音乐，这个值会跟着高，就不算"明显有声音"
+  const h = L.rmsH || [];
+  if (h.length >= 20){ const s = h.slice().sort((a, b) => a - b); L.nf = s[Math.floor(s.length * 0.15)]; }
   // 每分钟概况：不正常就记一笔，正常的 5 分钟记一笔
   const M = L.mon, span = realNow() - M.t0;
   if (span >= 60){
@@ -832,7 +867,7 @@ function capTick(){
     const bad = M.zero > 2 || got < 0.9 || quiet || (L.engine === 'dg' && M.loud > 20 && M.words < 5);
     L.monCount = (L.monCount || 0) + 1;
     if (bad || L.monCount % 5 === 0)
-      log(`${bad ? '⚠ ' : ''}最近 ${Math.round(span)} 秒：收到 ${Math.round(got * 100)}% 的声音，原始音量 ${Math.round(db)}dB，自动放大 +${Math.round(gdb)}dB${quiet ? '（放大后还是太小）' : ''}，${Math.round(M.zero)} 秒全是静音，${Math.round(M.loud)} 秒明显有声音` + (L.engine === 'dg' ? `，Deepgram 回了 ${M.words} 个词` : ''));
+      log(`${bad ? '⚠ ' : ''}最近 ${Math.round(span)} 秒：收到 ${Math.round(got * 100)}% 的声音，原始音量 ${Math.round(db)}dB，自动放大 +${Math.round(gdb)}dB${quiet ? '（放大后还是太小）' : ''}，${Math.round(M.zero)} 秒全是静音，背景声 ${Math.round(20 * Math.log10(L.nf || 1e-6))}dB，${Math.round(M.loud)} 秒明显有声音` +(L.engine === 'dg' ? `，Deepgram 回了 ${M.words} 个词` : ''));
     monReset();
   }
 }
@@ -877,6 +912,7 @@ async function start(){
   capWindowReset();
 
   L.engine = engine;
+  Object.assign(L, {rmsH:[], nf:0, binSq:0, binT:0, whisperAt:0, whisperN:0, whisperManual:false});
   L.state = 'running';
   log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}`);
   if (engine === 'dg') DG.begin();
@@ -1099,14 +1135,25 @@ const DG = {
     if (this.fails >= 3 && S.keys.groq.trim()) this.toWhisper('Deepgram 连续连不上，改用 Groq Whisper');
     else if (this.fails === 3) toast('Deepgram 连不上，检查 key 和网络', 7000);
   },
-  // 这节课剩下的时间改用 Groq Whisper 按句识别（字幕整句出，晚几秒）
-  toWhisper(why){
+  // 改用 Groq Whisper 按句识别（字幕整句出，晚几秒）。自动切过去的，过一阵会试着切回 Deepgram（capTick）；
+  // 手动切的就一直用，直到手动切回来
+  toWhisper(why, manual){
     log(why); toast(why.replace('Groq Whisper 按句识别', 'Whisper 按句识别：字幕整句出，会晚几秒'), 8000);
     this.endLine('flush');
     const ws = this.ws; this.ws = null;
     if (ws){ ws.onclose = ws.onmessage = null; try { ws.close(); } catch(e){} }
     clearInterval(this.dog);
-    L.engine = 'whisper'; L.seg = null; L.hist = []; this.queue = []; this.sent = []; updateProv();
+    L.engine = 'whisper'; L.seg = null; L.hist = []; this.queue = []; this.sent = [];
+    L.whisperAt = Date.now(); L.whisperManual = !!manual; if (!manual) L.whisperN = (L.whisperN || 0) + 1;
+    updateProv(); showEngine();
+  },
+  // 从 Whisper 切回 Deepgram 实时识别
+  toDg(why){
+    log(why); toast(why, 5000);
+    if (L.seg) flushSeg();
+    L.engine = 'dg'; L.seg = null; L.hist = []; L.loudNoWord = 0;
+    this.begin(); this.lastWordAt = realNow(); this.kickAt = performance.now();
+    updateProv(); showEngine();
   },
   push(f, t){
     this.queue.push({t, d:f.length / L.rate, buf:toPcm16(f, L.rate)});
@@ -1269,7 +1316,12 @@ function onFrame(f){
   // 自动音量：后面识别、录音、音量条用的都是放大后的声音
   const g = agcGain(raw), rms = raw * g;
   f = agcApply(f, g); M.g += g; M.gn++;
-  if (rms > 0.015){ M.loud += fd; L.loudNoWord += fd; }
+  // 每 0.1 秒记一个音量，capTick 用它算背景声水平 L.nf
+  L.binSq = (L.binSq || 0) + rms * rms * fd; L.binT = (L.binT || 0) + fd;
+  if (L.binT >= 0.1){ (L.rmsH = L.rmsH || []).push(Math.sqrt(L.binSq / L.binT)); if (L.rmsH.length > 300) L.rmsH.shift(); L.binSq = L.binT = 0; }
+  // "明显有声音"：够响，而且比背景声高出一截（约 10dB）。以前只看够不够响，没人说话时
+  // 被放大的风机声、音乐也算，Deepgram 正常地不出字，却被当成认不出，切到了 Whisper
+  if (rms > Math.max(0.015, (L.nf || 0) * 3)){ M.loud += fd; L.loudNoWord += fd; }
   $('#level i').style.width = Math.min(100, rms * 900) + '%';
   if (L.mp3) mp3Push(f, t);
   if (L.engine === 'dg'){ DG.push(f, t); return; }
@@ -1332,23 +1384,33 @@ async function runTr(){
   if (Q.trBusy) return; Q.trBusy = true;
   try {
     while (Q.tr.length){
-      const batch = Q.tr.splice(0, 3);
+      // 句子出得快时（按句识别 4~5 秒一句）别一句发一次：离上次不到 3 秒就等一等，攒几句一起翻，省免费额度
+      const gap = 3000 - (Date.now() - (Q.trAt || 0));
+      if (gap > 0 && Q.tr.length < 3 && L.state === 'running'){ await sleep(gap); continue; }
+      // 积压了就一次多翻几句（最多 8 句），追得快、请求也少
+      let n = 0; while (n < Math.min(8, Q.tr.length) && Q.tr[n].lines === Q.tr[0].lines) n++;
+      const batch = Q.tr.splice(0, n);
       const lines = batch[0].lines;
       const firstIdx = lines.indexOf(batch[0].line);
       const context = lines.slice(Math.max(0, firstIdx - 3), Math.max(0, firstIdx)).filter(l => l.en && l.status === 'done').map(l => l.en);
       const items = batch.map(b => b.line);
       try {
+        Q.trAt = Date.now();
         const out = await translateWithFallback(trPrompt(), buildUser(items, context));
         const zh = parseNumbered(out, items.length);
         items.forEach((l, k) => { l.zh = zh[k] || '（漏译）'; l.status = 'done'; });
       } catch(e){
-        if (Q.tr.length > 40 || !items.every(l => (l.tries = (l.tries || 0) + 1) < 4)){
+        // 以前试 4 次（约 32 秒）就判失败，可 Gemini 一限流要歇 1 分钟，每次卡住最前面几句的中文就永远丢了。
+        // 现在限流只是等，等到有模型恢复接着翻；只有真出错（参数、内容问题）才算次数
+        const left = coolLeft(), limited = e.cooling || e.status === 429;
+        if (!isFinite(left) || (!limited && !items.every(l => (l.tries = (l.tries || 0) + 1) < 4))){
           items.forEach(l => { l.status = 'err'; l.zh = '翻译失败：' + netMsg(e); });
         } else {
           Q.tr.unshift(...batch);
-          setStatus('翻译暂时都不可用，稍后重试');
-          log('所有翻译模型都不可用，8秒后重试');
-          await sleep(8000); continue;
+          const w = Math.max(1000, Math.min(left, 15000));
+          setStatus(`翻译模型都在限流，${Math.ceil(w / 1000)} 秒后接着翻（待翻译 ${Q.tr.length} 句）`);
+          log(`所有翻译模型都不可用，${Math.ceil(w / 1000)}秒后重试，待翻译 ${Q.tr.length} 句`);
+          await sleep(w); continue;
         }
       }
       items.forEach(renderLine);
@@ -1830,8 +1892,20 @@ function updateButtons(){
   $('#btnPause').textContent = st === 'paused' ? '继续' : '暂停';
   $('#togSave').disabled = st !== 'idle';
   $('#btnMic').style.display = st === 'idle' ? '' : 'none';   // 收音模式点"开始"时才生效，上课中不显示
+  showEngine();
   if (st === 'idle') $('#clock').textContent = '00:00';
 }
+// 上课中显示现在用哪种识别，点一下切到另一种（两个 key 都有才显示）
+function showEngine(){
+  const b = $('#btnEng');
+  b.style.display = L.state !== 'idle' && S.keys.dg.trim() && S.keys.groq.trim() ? '' : 'none';
+  b.textContent = L.engine === 'whisper' ? 'Whisper' : 'Deepgram';
+}
+$('#btnEng').onclick = () => {
+  if (L.state !== 'running'){ toast('点"继续"之后再切'); return; }
+  if (L.engine === 'dg') DG.toWhisper('手动切换到 Groq Whisper 按句识别', true);
+  else DG.toDg('手动切回 Deepgram 实时识别');
+};
 
 /* ================= panels ================= */
 function openPanel(sel){
@@ -2489,9 +2563,9 @@ function fillSettings(){
   if (!$('#cmpText').value) $('#cmpText').value = 'Before you light the furnace, check the inlet and manifold pressure with a manometer, and make sure the inducer motor proves the pressure switch.';
   $('#provList').innerHTML = PROVIDERS.map(p => {
     const cd = (cooldown[p.id] || 0) - Date.now();
-    const st = !(S.keys[p.keyName] || '').trim() ? '没填 key' : cd > 0 ? `限流中，约 ${Math.ceil(cd/60000)} 分钟后恢复` : '可用';
+    const st = !(S.keys[p.keyName] || '').trim() ? '没填 key' : cd > 0 ? `${provErr[p.id] || '限流中'}，约 ${Math.ceil(cd/60000)} 分钟后恢复` : provErr[p.id] ? '上次失败：' + provErr[p.id] : '可用';
     return `<div class="prov"><input type="checkbox" data-en="${p.id}" ${S.enabled[p.id] ? 'checked' : ''} style="width:20px;height:20px">
-      <div><span class="nm">${esc(p.name)}</span> <span class="st">${st}</span></div>
+      <div><span class="nm">${esc(p.name)}</span> <span class="st">${esc(st)}</span></div>
       <input type="text" data-model="${p.id}" value="${esc(modelOf(p))}"></div>`;
   }).join('');
   $('#provList').querySelectorAll('[data-en]').forEach(c => c.onchange = () => { S.enabled[c.dataset.en] = c.checked; saveSettings(); });

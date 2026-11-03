@@ -51,7 +51,8 @@
 | `start(` `pause(` `resume(` `end(` `L.gum` | 开始/暂停/继续/结束；麦克风参数 |
 | `/* === 录音：每 3 分钟` `recStart` `recRotate` `recSave` `recStop` | 录音分段（MediaRecorder 备用方式，`recRotate`/`recStop` 也分派给 MP3 方式） |
 | `/* 录音（MP3 方式` `mp3Start` `mp3Push` `mp3Put` `mp3Enc` `mp3Cut` `MP3_SEG` | 默认录音：当场压 MP3，60 秒一段 |
-| `const DG = {` `toWhisper` `watch` `lost` | Deepgram 实时：看门狗、断线重发、`realT` 时间换算、`onMsg` 逐词/存疑/说话人/语言、`endLine` 断行、不出字改用 Whisper |
+| `const DG = {` `toWhisper` `toDg` `watch` `lost` | Deepgram 实时：看门狗、断线重发、`realT` 时间换算、`onMsg` 逐词/存疑/说话人/语言、`endLine` 断行、不出字改用 Whisper、切回 |
+| `showEngine` `#btnEng` | 上课中手动切 Deepgram / Whisper 的按钮 |
 | `onFrame` `flushSeg` `runAsr` `runTr` `dirty` | 每块声音的处理（先自动音量）、按句切段、识别队列、翻译队列、保存（存 `ws` `lang`） |
 | `const Cloud = {` `syncOnce` | Google 登录、Drive 同步（设置、记录、录音、文字记录、合成整节课录音） |
 | `/* === rendering` `enHtml` `lineHtml` `renderLine` `typeTick` | 字幕显示、逐词打字效果、自动跟随最新 |
@@ -72,13 +73,13 @@
 - **收音"全场"模式**关掉 echoCancellation、noiseSuppression、autoGainControl（通话处理会把远处的人声当噪声压掉，像"锁定主讲人"）；"近处（通话模式）"三个都打开（**iPhone 上 AGC 要和 echoCancellation 一起开才生效**，只开 AGC 没用）。`micMode` 每台设备各自存、不云同步（设备放的位置不一样）；主界面"开始"旁边有"全场/近处"按钮，上课中隐藏
 - **iPhone 关掉通话模式时给网页的原始声音只有约 -55dB**（iPad 约 -28dB），是硬件和出厂调校差别，设置里调不了。Deepgram 实时收到这么小的声音，认出开头两句后就一直不出字（实测录音里人声一直清楚，放大 28dB 后本地 Whisper 全认得出）
 - **自动音量**（`agcGain` `agcApply`）：按最近 10 秒说话音量的第 90 百分位调到约 -22dB，最多 ×30，开头几秒调得快、之后慢慢跟，只在像说话时调，太响马上降 + 软限幅；识别、录音、音量条都用放大后的声音。回放有"🔈"按钮 ×4/×10（经 Web Audio，iPhone 静音键开着时会没声，所以默认不接）
-- **回声大的场地 Deepgram 认不出字**（实测地下球场：音量正常、Deepgram 实时和离线都几乎 0 词，Whisper 能认出 2000+ 词）。不是 iPhone 在压远处的声音，是回声把字糊了；近处咳嗽清楚是因为近。4 分钟里两次"明显有声音却不出字"→ `DG.toWhisper()` 这节课改用 Groq Whisper 按句识别（这节课不会切回 Deepgram）；采音前加 100Hz 高通（低音过滤）。最有效的还是手机靠近说话人或外接麦
+- **回声大的场地 Deepgram 认不出字**（实测地下球场：音量正常、Deepgram 实时和离线都几乎 0 词，Whisper 能认出 2000+ 词）。不是 iPhone 在压远处的声音，是回声把字糊了；近处咳嗽清楚是因为近。4 分钟里两次"明显有声音却不出字"→ `DG.toWhisper()` 改用 Groq Whisper 按句识别，5 分钟后自动试着切回（`DG.toDg`，再被切走就等 10、20 分钟）；主界面 `#btnEng` 可手动切（手动切的不自动切回）；采音前加 100Hz 高通（低音过滤）。最有效的还是手机靠近说话人或外接麦
 - **页面切到别的标签页/App 或锁屏，iPad 会关掉网页的麦克风**，代码救不了，只能提醒用户用分屏
 
 ### Deepgram 实时
 - 10 秒没回应 / 网络积压 / 连接超时都重连，并重发还没定稿的声音；只在句号问号叹号（≥4 词，含中文 。？！和 ।）或 40 词时断行；定稿删掉的词留成存疑 `⟦…⟧`（淡色显示、不送翻译、导出写成 `(xx?)`）；`diarize` 换人另起一行
 - **网络积压判断**：积压 >256KB 且 2 秒没减少、连上超过 10 秒才算堵；重连只补发最近 15 秒（以前一积压就重连 → 补发又积压，死循环卡了 1 分钟）
-- **实时诊断和自动恢复**（`capTick` `micFix` `L.mon`）：收到的声音连续 5 秒全是 0 → 重建采音（麦克风被关就重新要）；放大后明显有声音（rms>0.015）但 Deepgram 30 秒没回词 → 重连；每分钟概况（原始音量、自动放大多少 dB、Deepgram 回了几个词），不正常带 ⚠ 记，正常 5 分钟记一次
+- **实时诊断和自动恢复**（`capTick` `micFix` `L.mon`）：收到的声音连续 5 秒全是 0 → 重建采音（麦克风被关就重新要）；"明显有声音"= 放大后 rms>0.015 **且** 比背景声 `L.nf`（最近 30 秒每 0.1 秒音量的第 15 百分位）高 3 倍——以前只看 0.015，没人说话时放大的风机声、唱歌放音乐也算，Deepgram 正常不出字却被当成认不出、切到 Whisper（实测 11/2 上课）；明显有声音但 Deepgram 30 秒没回词 → 重连；每分钟概况（原始音量、自动放大多少 dB、Deepgram 回了几个词），不正常带 ⚠ 记，正常 5 分钟记一次
 
 ### 录音和回放
 - **录音默认 MP3 方式**（`mp3Start` `mp3Push` `mp3Cut`）：采音拿到的声音当场用 lamejs 压成 MP3（22.05kHz 40kbps，固定 5000 字节/秒），一条连续的流，每 60 秒存一段（`cont:true`），段首尾直接拼接就是完整文件、没有接缝；少收的声音按 `realNow()` 补静音。页面打开 2 秒后预加载 lamejs；开始时 6 秒内加载不了才退回 MediaRecorder 方式（MediaRecorder 分段在合并处有明显断点，这是改掉它的原因）
@@ -110,8 +111,10 @@
 ## 用户的服务账号（key 在用户设备上，不在这里）
 
 - Deepgram：原账号送了 $200 额度（建议用这个），后来新注册的只有 $50；没绑卡，额度用完会被拒、不扣钱
-- Groq：免费；gpt-oss-120b 是目前主力翻译（0.3–0.8 秒/句，精修时连着翻会 429）；qwen3-32b 已下架；Whisper 逐词时间也用它
-- Gemini：免费层，没开结算（别引导用户开 $300 试用）；模型名用 `gemini-flash-lite-latest`；精修时偶尔"额度用完"429。用户有 Gemini Pro 会员，但那是 App 用的，不给 API 加额度
+- Groq：免费；gpt-oss-120b 是目前主力翻译（0.3–0.8 秒/句）；免费额度**每个模型各算各的**（gpt-oss-120b / gpt-oss-20b / qwen3.8-27b 各 30 RPM、1000 RPD、20 万 TPD），11/2 上课到 11:34 gpt-oss-120b 每天额度用完；Llama 3.3 70B / 3.1 8B 已 404 下架、qwen3-32b 已下架；Kimi K2 已不在 Groq 上；Whisper 逐词时间也用它
+- 不用的：Cerebras（要绑卡才送 $5）、Kimi 开放平台（余额 0 要充值，Tier0 只有 3 RPM）
+- **翻译队列**（`runTr`）：离上次请求不到 3 秒就等，攒几句一起翻，积压时一次最多 8 句；所有模型都在冷却时只等不判失败（以前试 4 次约 32 秒就判"翻译失败"，Gemini 一限流歇 1 分钟，每次丢几句中文）；`provErr` 记失败原因，设置页模型列表显示
+- Gemini：免费层，没开结算（别引导用户开 $300 试用）；模型名用 `gemini-flash-lite-latest`，另加 `gemini-flash-latest`、`gemma-3-27b-it`（Gemma 不支持 systemInstruction，`noSys` 拼进用户消息）；**这两个还没用真 key 验证过**；Flash-Lite 免费每分钟十几次，连着翻约 1 分钟就 429；精修时偶尔"额度用完"429。用户有 Gemini Pro 会员，但那是 App 用的，不给 API 加额度
 - 硅基流动：有余额，Qwen3-8B / GLM-4-9B 是免费模型
 - 豆包（火山引擎）语音识别不免费（录音文件 0.8 元/小时），而且要请求头鉴权、网页直连不了，要中转服务器；用户决定先不用
 
@@ -124,6 +127,7 @@
 ## 待办
 
 ### 等用户上课测试（测完让用户点"复制全部日志"发来）
+- **11/2 改的翻译和切换**：还会不会出现"翻译失败"；设置页模型列表里 Qwen 3.8 27B、gpt-oss-20b、Gemini Flash、Gemma 是否"可用"（模型名对不对）；唱歌放音乐时还会不会切 Whisper（日志每分钟概况里有"背景声 xxdB"）；自动切回 Deepgram 是否正常
 - **iPhone 自动音量**：绿色音量条能不能动到一半左右；Deepgram 会不会还是两句后停；日志里"原始音量 / 自动放大 +xxdB / Deepgram 回了几个词"
 - **"近处（通话模式）"** 在 iPhone 上实际效果（手机放老师旁边时）
 - **回声大的场地**：自动改用 Whisper 是否触发、切换后字幕是否正常；100Hz 低音过滤有没有帮助
@@ -137,8 +141,10 @@
 - Deepgram `language=multi` 时能不能带 keyterm（现在是不带）
 - 实时 Whisper（按句识别）没有逐词时间、不标语言（只靠中日文字判断中文）
 
+### 已定、下一批做
+- **分辨说话 / 音乐 / 唱歌**：网页里跑 YAMNet（MediaPipe 音频分类，约 5–10MB，加载不了退回"听节奏"：说话停顿多、起落快）；像音乐唱歌时不自动切 Whisper；主界面音量条旁显示"🎵 音乐 / 🎤 唱歌 / 🎵+🗣"；不像说话的声音不送 Whisper，并用 Groq 返回的 `no_speech_prob` `avg_logprob` 丢瞎编句
+
 ### 提过、用户还没决定的
 - **开始前选课程**：点"开始"前选是哪门课（比如 HVAC 1084），Drive 里自动放到 `课堂同传/<课程>/<日期>`
 - **把 `closernow/HVAC` 搬到本地用 Claude Code 管**：clone 到比如 `D:\范莎学院\HVAC 刷题\`，建 gitignore 的 `资料\` 放文字记录和课件（仓库公开，录音文字稿不能上传），写简短 CLAUDE.md，必要时题库按章节拆；只搬这一个仓库。用户问过当时手机上改的新 1084.html 怎么出现在电脑上：电脑上没找到 `1084.html`（D 盘和用户目录 5 层内），待用户说明位置
 - 建议用户装 Google Drive 电脑版，让「课堂同传」文件夹自动同步到电脑
-- Deepgram 改用 Whisper 后，同一节课里是否要再试着切回 Deepgram（现在不会切回）
