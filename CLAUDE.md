@@ -55,7 +55,8 @@
 | `showEngine` `#btnEng` | 上课中手动切 Deepgram / Whisper 的按钮 |
 | `onFrame` `flushSeg` `runAsr` `runTr` `dirty` | 每块声音的处理（先自动音量）、按句切段、识别队列、翻译队列、保存（存 `ws` `lang`） |
 | `const Cloud = {` `syncOnce` | Google 登录、Drive 同步（设置、记录、录音、文字记录、合成整节课录音） |
-| `/* === rendering` `enHtml` `lineHtml` `renderLine` `typeTick` | 字幕显示、逐词打字效果、自动跟随最新 |
+| `/* === rendering` `enHtml` `lineHtml` `renderLine` `typeTick` `markRecent` `setStick` `showJump` | 字幕显示、逐词打字效果、正在说的句子突出、自动跟随最新 |
+| `renderHistory` `bindSwipe` `selMode` `selWhere` `delSessions` `HIST` | 历史记录列表：左滑删除、"选择"批量删、选中 N 分钟以内 |
 | `addWordTimes` `hasWordTimes` `wordTimes` `enWordsHtml` | 逐词时间（`l.ws`）、历史记录里每个词包一层 span |
 | `const P = {` `segBlob` `plUnlock` `plLoad` `plAt` `plCur` `plShow` | 历史记录里的播放器（MP3 方式的几段当一个文件播：`parts`） |
 | `const HL = {` `plHL` `hlFind` `hlScroll` `hlFollow` `hlLoop` | 回放时句子/逐词高亮、自动跟随、"回到当前" |
@@ -88,6 +89,10 @@
 - **回放**：句子/逐词高亮跟着播放（`HL` `plHL`，播放时每帧更新），当前句自动滚到屏幕偏上；手指滑动字幕就暂停跟随、出"回到当前"；拖进度条时字幕实时跳；点词从那个词播。逐词时间存在行的 `ws` 里（实时、Deepgram 精修、Whisper 精修都有）；**没有真实逐词时间的句子（老记录、`est`）只高亮整句**，估算的时间对不上语速，逐词跳会越跳越慢。播放器在顶部固定（手机上进度条单独一行），有后退 5 秒、倍速（记在 `lt.rate`）、电脑空格键
 - **iPad 播放**：只有点击当下才允许 `play()`，所以点击时先 `plUnlock()` 用静音解锁（解锁后 `P.i=-1` 让录音重新装）；音频先读进内存再 `createObjectURL`，失败再转 data URL
 - **iPad 分享**：`navigator.share` 也要点击当下，合成 MP3 耗时，所以导出分两步（合成好后按钮变"保存整节课录音"再点）
+
+### 主界面显示和跟随
+- 正在说的那句（最后一行 `live`/`asr`）`cur`：放大 1.15 倍、左边琥珀色条、灰字调亮；刚说完的两句 `recent` 和中文全亮（不受中文透明度）；跟随最新时（`#subs.follow`）更早的调暗到 0.45，往回翻时全亮
+- 往回翻**不自动跳回**（以前 12 秒没碰就跳回，用户嫌正看着被拉走）；只有点"回到最新"（显示"↓ N 句新内容"）、自己滑到底、点"开始"新上课时才回到最新
 
 ### 多语言、日志
 - **多语言（实验，默认关，云同步）** `S.multiLang`：Deepgram `language=multi`（这时不加 keyterm，怕被拒），Whisper 不指定语言；每句记主要语言 `l.lang`（英文不记，`addLang` 按词计数；Whisper 没给语言但有中日文字的当中文），显示/导出标语言；中日文词之间去空格（`cjkTight`，内部仍按空格分词，逐词时间对得上）；翻译用 `SYS_PROMPT_MULTI`：中文→英文，其他→中文

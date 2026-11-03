@@ -54,6 +54,13 @@ a{color:#7fb7ff}
 .line.err .zh{color:var(--danger);opacity:.8}
 .clickable .line{cursor:pointer;border-radius:8px;padding:4px 6px;margin-left:-6px}
 .clickable .line:active,.clickable .line.playing{background:#1b222b}
+/* 上课时：正在说的那句放大、左边琥珀色条；刚说完的两句和中文全亮；跟随最新时更早的调暗 */
+#subs .line{border-left:3px solid transparent;padding-left:10px;margin-left:-13px;transition:opacity .3s}
+#subs .line.cur{border-left-color:var(--warn)}
+#subs .line.cur .en{font-size:calc(var(--fs) * 1.15)}
+#subs .line.cur .en .im{color:#aeb7c2}
+#subs .line.cur .zh,#subs .line.recent .zh{opacity:max(var(--zh-op), .9)}
+#subs.follow .line:not(.cur):not(.recent){opacity:.45}
 #jump{position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom) + 96px);display:none;background:#2d6b4a}
 
 /* bottom bar */
@@ -90,6 +97,20 @@ a{color:#7fb7ff}
 .cmp b{font-size:12px;color:var(--muted);font-weight:400}
 
 .sess{display:flex;align-items:center;gap:8px;padding:12px;border:1px solid var(--line);border-radius:12px;margin-bottom:10px;background:var(--panel)}
+/* 历史记录：左滑露出删除；"选择"模式下批量删 */
+.swipe{position:relative;margin-bottom:10px;border-radius:12px;overflow:hidden;touch-action:pan-y}
+.swipe .sess{position:relative;z-index:1;margin:0;transition:transform .2s}
+.swipe.drag .sess{transition:none}
+.swipe.open .sess{transform:translateX(-90px)}
+.swipe .sdel{position:absolute;right:0;top:0;bottom:0;width:90px;border-radius:0;background:var(--danger);color:#fff}
+.sess .sck{display:none;width:22px;height:22px;flex:none}
+.selecting .sess .sck{display:block}
+.selecting .sess > button{display:none}
+#selBar{display:none;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);font-size:14px;color:var(--muted)}
+#selBar.show{display:flex}
+#selBar input{width:56px;padding:6px}
+#selBar button{padding:8px 12px}
+#selBar .danger{background:var(--danger);color:#fff}
 .sess .info{flex:1;min-width:0}
 .sess .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sess .meta{color:var(--muted);font-size:12px;margin-top:3px}
@@ -119,7 +140,7 @@ a{color:#7fb7ff}
   <button id="btnSettings">设置</button>
 </div>
 
-<div id="subs"><div class="empty">点"开始"，手机/平板对着讲台<br>英文识别后会显示中文翻译</div></div>
+<div id="subs" class="follow"><div class="empty">点"开始"，手机/平板对着讲台<br>英文识别后会显示中文翻译</div></div>
 <button id="jump">↓ 回到最新</button>
 
 <div id="bottom">
@@ -135,7 +156,13 @@ a{color:#7fb7ff}
 
 <!-- history -->
 <div class="panel" id="pHistory">
-  <header><button data-close>返回</button><h2>历史记录</h2></header>
+  <header><button data-close>返回</button><h2>历史记录</h2><button id="btnSel">选择</button></header>
+  <div id="selBar">
+    <button id="selAll">全选</button>
+    <span class="selmin"><input type="number" id="selMin" min="1" max="999" inputmode="numeric"> 分钟以内 <button id="selShort">选中</button></span>
+    <span class="spacer"></span>
+    <button id="selDel" class="danger" disabled>删除</button>
+  </div>
   <div class="body" id="histList"></div>
 </div>
 
@@ -895,7 +922,7 @@ async function start(){
   let ok = false;
   for (let i = 0; i < CAP_MODES.length && !ok; i++){ ok = await buildCapture(i); if (!ok) L.capRatios[i] = -1; }
   if (!ok){ toast('音频处理启动失败，换个浏览器试试'); stream.getTracks().forEach(t => t.stop()); return; }
-  $('#subs').innerHTML = ''; stick = true;
+  $('#subs').innerHTML = ''; stick = false; setStick(true);
 
   L.mp3 = null;
   if (L.save){
@@ -1898,10 +1925,18 @@ function paintLine(l){
   if (!L.lines.includes(l)) return;
   const empty = box.querySelector('.empty'); if (empty) empty.remove();
   let el = document.getElementById('ln' + l.id);
-  if (!el){ el = document.createElement('div'); el.id = 'ln' + l.id; box.appendChild(el); }
+  if (!el){ el = document.createElement('div'); el.id = 'ln' + l.id; box.appendChild(el); if (!stick) showJump(++newSince); }
   el.className = 'line ' + l.status;
   el.innerHTML = lineHtml(l);
+  markRecent();
   if (stick) box.scrollTop = box.scrollHeight;
+}
+// 正在说的那句（cur）放大、左边色条；刚说完的两句（recent）和它的中文全亮；更早的在跟随最新时调暗（CSS #subs.follow）
+function markRecent(){
+  const ls = L.lines, n = ls.length; if (!n) return;
+  const cur = ls[n - 1].status === 'live' || ls[n - 1].status === 'asr' ? ls[n - 1] : null;
+  const rec = new Set(ls.slice(Math.max(0, n - (cur ? 3 : 2)), cur ? n - 1 : n));
+  ls.slice(-6).forEach(l => { const e = document.getElementById('ln' + l.id); if (!e) return; e.classList.toggle('recent', rec.has(l)); e.classList.toggle('cur', l === cur); });
 }
 // 打字效果：识别结果一次来好几个词，不一下子全显示，而是一个词一个词打出来。
 // 速度看还剩几个没打：剩得多就打得快，保证下一批到之前打完，不会越拖越慢。
@@ -1928,19 +1963,24 @@ function typeTick(){
   }
   if (!TYPE.lines.size){ clearInterval(TYPE.timer); TYPE.timer = null; }
 }
-// 跟随最新：只有手指/鼠标滚动才算"我在往回看"，程序自己滚动不算；
-// 往回看时停 12 秒没再碰，自动回到最新
-let touchAt = 0;
+// 跟随最新：只有手指/鼠标滚动才算"我在往回看"，程序自己滚动不算。
+// 往回看时一直停在那里（以前 12 秒没碰就自动跳回，正看着被拉走），点"回到最新"或自己滑到底才接着跟
+let touchAt = 0, newSince = 0;
 ['touchstart', 'touchmove', 'wheel', 'mousedown'].forEach(ev => $('#subs').addEventListener(ev, () => { touchAt = Date.now(); }, {passive:true}));
 $('#subs').addEventListener('scroll', () => {
   if (Date.now() - touchAt > 1500) return;
   const b = $('#subs');
-  stick = b.scrollTop + b.clientHeight >= b.scrollHeight - 60;
-  $('#jump').style.display = stick ? 'none' : 'block';
+  setStick(b.scrollTop + b.clientHeight >= b.scrollHeight - 60);
 });
-function toLatest(){ const b = $('#subs'); stick = true; b.scrollTop = b.scrollHeight; $('#jump').style.display = 'none'; }
+function setStick(v){
+  if (v === stick) return;
+  stick = v; newSince = 0;
+  $('#subs').classList.toggle('follow', v);   // 往回看时旧内容不调暗，方便读
+  showJump(0);
+}
+function showJump(n){ const j = $('#jump'); j.style.display = stick ? 'none' : 'block'; j.textContent = n ? `↓ ${n} 句新内容` : '↓ 回到最新'; }
+function toLatest(){ const b = $('#subs'); setStick(true); b.scrollTop = b.scrollHeight; }
 $('#jump').onclick = toLatest;
-setInterval(() => { if (!stick && L.state !== 'idle' && Date.now() - touchAt > 12000) toLatest(); }, 1000);
 
 function updateButtons(){
   const st = L.state;
@@ -1969,7 +2009,7 @@ $('#btnEng').onclick = () => {
 function openPanel(sel){
   $(sel).classList.add('show');
   if (sel === '#pSettings'){ fillSettings(); renderCloud(); renderLog(); }
-  if (sel === '#pHistory'){ renderHistory(); Cloud.schedule(0); }
+  if (sel === '#pHistory'){ selMode(false); renderHistory(); Cloud.schedule(0); }
 }
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => {
   const p = b.closest('.panel'); p.classList.remove('show');
@@ -1982,10 +2022,84 @@ async function renderHistory(){
   let list = [];
   try { list = (await DB.allSessions()) || []; } catch(e){ box.innerHTML = '<div class="hint">读取失败：' + esc(e.message) + '</div>'; return; }
   list.sort((a, b) => b.createdAt - a.createdAt);
-  if (!list.length){ box.innerHTML = '<div class="empty">还没有记录</div>'; return; }
-  box.innerHTML = list.map(s => `<div class="sess" data-id="${s.id}"><div class="info"><div class="nm">${esc(s.title)}</div>
-    <div class="meta">${new Date(s.createdAt).toLocaleString()} · ${fmtT(s.duration || 0)} · ${(s.lines || []).length} 句${s.status === 'interrupted' ? ' · 意外中断' : (s.status === 'recording' && L.session && L.session.id === s.id && L.state !== 'idle') ? ' · 正在录' : ''}</div></div><button>打开</button></div>`).join('');
-  box.querySelectorAll('.sess').forEach(el => el.onclick = () => openSession(el.dataset.id));
+  HIST.list = list;
+  if (!list.length){ box.innerHTML = '<div class="empty">还没有记录</div>'; selMode(false); return; }
+  box.innerHTML = list.map(s => `<div class="swipe" data-id="${s.id}"><button class="sdel">删除</button><div class="sess"><input type="checkbox" class="sck"${isLiveSess(s.id) ? ' disabled' : ''}${HIST.sel.has(s.id) ? ' checked' : ''}><div class="info"><div class="nm">${esc(s.title)}</div>
+    <div class="meta">${new Date(s.createdAt).toLocaleString()} · ${fmtT(s.duration || 0)} · ${(s.lines || []).length} 句${s.status === 'interrupted' ? ' · 意外中断' : (s.status === 'recording' && isLiveSess(s.id)) ? ' · 正在录' : ''}</div></div><button>打开</button></div></div>`).join('');
+  box.querySelectorAll('.swipe').forEach(bindSwipe);
+  selCount();
+}
+const isLiveSess = id => !!(L.session && L.session.id === id && L.state !== 'idle');
+const HIST = {list:[], sel:new Set(), selecting:false};
+// 左滑露出"删除"；滑开时点这一条只是收回，不打开
+function bindSwipe(row){
+  const id = row.dataset.id, card = row.querySelector('.sess'), ck = row.querySelector('.sck');
+  let x0 = 0, y0 = 0, dx = 0, mode = '';
+  row.addEventListener('touchstart', e => {
+    if (HIST.selecting) return;
+    const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; dx = 0; mode = '';
+    document.querySelectorAll('.swipe.open').forEach(r => { if (r !== row) r.classList.remove('open'); });
+  }, {passive:true});
+  row.addEventListener('touchmove', e => {
+    if (HIST.selecting) return;
+    const t = e.touches[0], mx = t.clientX - x0, my = t.clientY - y0;
+    if (!mode && (Math.abs(mx) > 8 || Math.abs(my) > 8)) mode = Math.abs(mx) > Math.abs(my) ? 'x' : 'y';
+    if (mode !== 'x') return;
+    dx = mx; row.classList.add('drag');
+    const base = row.classList.contains('open') ? -90 : 0;
+    card.style.transform = `translateX(${Math.max(-120, Math.min(0, base + dx))}px)`;
+  }, {passive:true});
+  row.addEventListener('touchend', () => {
+    if (mode !== 'x') return;
+    row.classList.remove('drag'); card.style.transform = '';
+    const open = row.classList.contains('open') ? dx < 40 : dx < -40;
+    row.classList.toggle('open', open);
+    row.dataset.swiped = '1'; setTimeout(() => delete row.dataset.swiped, 400);   // 别把这次滑动当成点击
+  });
+  card.onclick = e => {
+    if (row.dataset.swiped) return;
+    if (HIST.selecting){
+      if (ck.disabled) return;
+      if (e.target !== ck) ck.checked = !ck.checked;
+      if (ck.checked) HIST.sel.add(id); else HIST.sel.delete(id);
+      selCount(); return;
+    }
+    if (row.classList.contains('open')){ row.classList.remove('open'); return; }
+    openSession(id);
+  };
+  row.querySelector('.sdel').onclick = async () => { if (await delSessions([id])) renderHistory(); else row.classList.remove('open'); };
+}
+function selMode(on){
+  HIST.selecting = on; HIST.sel.clear();
+  $('#histList').classList.toggle('selecting', on);
+  $('#selBar').classList.toggle('show', on);
+  $('#btnSel').textContent = on ? '取消' : '选择';
+  document.querySelectorAll('.swipe.open').forEach(r => r.classList.remove('open'));
+  document.querySelectorAll('#histList .sck').forEach(c => c.checked = false);
+  selCount();
+}
+function selCount(){ const n = HIST.sel.size; $('#selDel').textContent = n ? `删除所选（${n}）` : '删除'; $('#selDel').disabled = !n; }
+function selWhere(f){
+  HIST.sel = new Set(HIST.list.filter(s => !isLiveSess(s.id) && f(s)).map(s => s.id));
+  document.querySelectorAll('#histList .swipe').forEach(r => { r.querySelector('.sck').checked = HIST.sel.has(r.dataset.id); });
+  selCount();
+}
+$('#btnSel').onclick = () => selMode(!HIST.selecting);
+$('#selAll').onclick = () => selWhere(() => HIST.sel.size < HIST.list.filter(s => !isLiveSess(s.id)).length);
+$('#selMin').value = lsGet('lt.selMin', 2);
+$('#selShort').onclick = () => { const m = Math.max(1, +$('#selMin').value || 2); lsSet('lt.selMin', m); selWhere(s => (s.duration || 0) < m * 60); };
+$('#selDel').onclick = async () => { if (await delSessions([...HIST.sel])){ selMode(false); renderHistory(); } };
+// 删几节课（文字和录音）。正在录的不删；开了云同步的，Drive 里的文件夹进回收站
+async function delSessions(ids){
+  ids = ids.filter(id => !isLiveSess(id));
+  if (!ids.length){ toast('正在录的这节不能删'); return false; }
+  const one = ids.length === 1 && HIST.list.find(s => s.id === ids[0]);
+  const what = one ? '「' + one.title + '」' : ` ${ids.length} 节课`;
+  if (!confirm('删除' + what + '的文字和录音？' + (Cloud.st.on ? '本机删掉，Drive 里的文件夹会进回收站（30 天内还能在 Drive 回收站找回）。' : '删了找不回来。'))) return false;
+  for (const id of ids){ await DB.deleteSession(id); if (Cloud.st.on) Cloud.del.push(id); }
+  if (Cloud.st.on){ Cloud.save(); Cloud.schedule(1000); }
+  toast(`已删除${what}`);
+  return true;
 }
 
 /* 播放器：一节课的录音是好几段，连起来播；本机没有的段从云端下载 */
@@ -2551,10 +2665,8 @@ $('#btnRename').onclick = async () => {
 };
 $('#btnDelete').onclick = async () => {
   if (!curSess) return;
-  if (L.session && L.session.id === curSess.id && L.state !== 'idle'){ toast('正在录的这节不能删'); return; }
-  if (!confirm('删除「' + curSess.title + '」的文字和录音？' + (Cloud.st.on ? '本机删掉，Drive 里的文件夹会进回收站（30 天内还能在 Drive 回收站找回）。' : '删了找不回来。'))) return;
-  await DB.deleteSession(curSess.id);
-  if (Cloud.st.on){ Cloud.del.push(curSess.id); Cloud.save(); Cloud.schedule(1000); }
+  if (!HIST.list.some(s => s.id === curSess.id)) HIST.list.push(curSess);
+  if (!(await delSessions([curSess.id]))) return;
   $('#pSession').classList.remove('show'); renderHistory();
 };
 const safeName = s => s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_');
