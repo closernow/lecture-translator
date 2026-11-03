@@ -1185,16 +1185,21 @@ const DG = {
     if (!m.is_final){
       if (tx && !this.cur) this.newLine(words[0].s, S.diarize ? words[0].spk : undefined);
       if (!this.cur) return;
-      this.cur.im = words; this.cur.line.im = words.map(w => w.w).join(' ');
-      renderLine(this.cur.line);
+      // 后一版猜测变空或变短时，以前直接换掉，显示过的灰字闪一下就没了（定稿时也查不到，存疑都不留）。
+      // 现在记住显示过的词（seen）：新猜测覆盖到的时间段用新的，没覆盖到的旧词留着，灰字照样显示，等定稿再定
+      const c = this.cur, a = words.length ? words[0].s : Infinity, b = words.length ? words[words.length - 1].e : -Infinity;
+      c.seen = (c.seen || []).filter(p => (p.e <= a || p.s >= b) && p.s >= this.confirmed - 0.02).concat(words).sort((x, y) => x.s - y.s);
+      c.im = c.seen; c.line.im = c.seen.map(w => w.w).join(' ');
+      renderLine(c.line);
       return;
     }
     // ---- 定稿 ----
     if (words.length){ this.lastWordAt = realNow(); L.loudNoWord = 0; if (L.mon) L.mon.words += words.length; }
-    const fs = this.realT(m.start || 0), fe = this.realT((m.start || 0) + (m.duration || 0));
+    const fe = this.realT((m.start || 0) + (m.duration || 0));
     if (fe > this.confirmed) this.confirmed = fe;
     // C：这段里刚才显示过、定稿却删掉的词，不让它凭空消失，留成淡色的"存疑"（⟦…⟧ 包起来）
-    const prev = this.cur ? this.cur.im.filter(w => w.s >= fs - 0.05 && w.s < fe) : [];
+    // 跟显示过的所有灰字比（不只最新一版），定稿结束之前的都算在这段里
+    const prev = this.cur ? (this.cur.seen || this.cur.im).filter(w => w.s < fe) : [];
     // 同一个词：开始时间差不多，或者开始时间落在定稿某个词的中间
     const dropped = prev.filter(p => !words.some(k => Math.abs(k.s - p.s) < 0.12 || (p.s >= k.s && p.s < k.e - 0.05)));
     const all = words.map(w => ({...w, doubt:false})).concat(dropped.map(w => ({...w, doubt:true, spk:undefined}))).sort((a, b) => a.s - b.s);
@@ -1204,7 +1209,7 @@ const DG = {
       if (!this.cur) this.newLine(w.s, spk);
       const c = this.cur;
       if (spk !== undefined && c.line.spk !== undefined && spk !== c.line.spk && c.line.en){
-        const keep = c.im; c.im = []; this.endLine(); this.newLine(w.s, spk); this.cur.im = keep;
+        const keep = c.seen || c.im; c.im = c.seen = []; this.endLine(); this.newLine(w.s, spk); this.cur.im = this.cur.seen = keep;
       } else if (spk !== undefined && c.line.spk === undefined) c.line.spk = spk;
       const line = this.cur.line;
       const piece = w.doubt ? '⟦' + w.w + '⟧' : w.w;
@@ -1214,7 +1219,7 @@ const DG = {
     }
     if (dropped.length) log(`识别删掉了 ${dropped.length} 个词，留成存疑：${dropped.map(w => w.w).join(' ')}`);
     const c = this.cur; if (!c) return;
-    c.im = c.im.filter(w => w.s >= this.confirmed - 0.02);   // 定稿范围之后的灰字留着，不闪
+    c.im = c.seen = (c.seen || c.im).filter(w => w.s >= fe);   // 定稿范围之后的灰字留着，不闪
     c.line.im = c.im.map(w => w.w).join(' ');
     renderLine(c.line);
     // 断行只看句子：句号/问号/叹号结尾（至少 4 个词，中文的。？！也算），或者太长了
@@ -1240,7 +1245,7 @@ const DG = {
       Q.tr.push({line, session:L.session, lines:L.lines}); runTr(); updateProv();
     }
     if (mode === 'carry' && c.im.length){
-      this.newLine(c.im[0].s); this.cur.im = c.im; this.cur.line.im = imText; renderLine(this.cur.line);
+      this.newLine(c.im[0].s); this.cur.im = this.cur.seen = c.im; this.cur.line.im = imText; renderLine(this.cur.line);
     }
   },
   // 暂停：让 Deepgram 把已经听到的马上定稿
