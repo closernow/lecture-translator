@@ -53,6 +53,8 @@
 | `/* 录音（MP3 方式` `mp3Start` `mp3Push` `mp3Put` `mp3Enc` `mp3Cut` `MP3_SEG` | 默认录音：当场压 MP3，60 秒一段 |
 | `const DG = {` `toWhisper` `toDg` `watch` `lost` | Deepgram 实时：看门狗、断线重发、`realT` 时间换算、`onMsg` 逐词/存疑/说话人/语言、`endLine` 断行、不出字改用 Whisper、切回 |
 | `showEngine` `#btnEng` | 上课中手动切 Deepgram / Whisper 的按钮 |
+| `/* === 有没有人说话` `VAD` `VAD_SPEECH` `VAD_MUSIC` `showVad` `#vadTag` | 本机说话判断（YAMNet）：每秒一次说话/音乐分数、顶上 🗣/🎵/💤 标记 |
+| `enterStandby` `wake` `DG.sleep` `DG.tryWhisper` | 智能待机/唤醒；自动切 Whisper 前先试认 |
 | `onFrame` `flushSeg` `runAsr` `runTr` `dirty` | 每块声音的处理（先自动音量）、按句切段、识别队列、翻译队列、保存（存 `ws` `lang`） |
 | `const Cloud = {` `syncOnce` | Google 登录、Drive 同步（设置、记录、录音、文字记录、合成整节课录音） |
 | `/* === rendering` `enHtml` `lineHtml` `renderLine` `typeTick` `markRecent` `setStick` `showJump` | 字幕显示、逐词打字效果、正在说的句子突出、自动跟随最新 |
@@ -94,6 +96,13 @@
 - 正在说的那句（最后一行 `live`/`asr`）`cur`：放大（设置"正在说的句子" `curScale` 100–150%，默认 115%）、左边色条（`curColor` 琥珀/绿/蓝/不加，CSS 变量 `--cur-x` `--cur-c`）、灰字调亮；刚说完的两句 `recent` 和中文全亮（不受中文透明度）；跟随最新时（`#subs.follow`）再往上越来越淡（`f1`~`f4`：.75/.55/.4/.3，更早 .25），顶上 70px 渐变消失（mask-image），往回翻时全亮。`curScale` `curColor` 不云同步（每台设备屏幕不同）
 - 往回翻**不自动跳回**（以前 12 秒没碰就跳回，用户嫌正看着被拉走）；只有点"回到最新"（显示"↓ N 句新内容"）、自己滑到底、点"开始"新上课时才回到最新
 
+### 说话判断、智能待机（11/2 做的第二批）
+- **YAMNet**（MediaPipe `@mediapipe/tasks-audio@0.10.35`，jsdelivr；模型 storage.googleapis.com `yamnet/float32/1`，约 4MB + wasm 6MB，页面打开 4 秒后预加载）：每攒 1 秒声音判断一次（setTimeout 里跑，电脑上约 8ms），说话类最高分 ≥0.3 算说话、音乐类 ≥0.3 算音乐。实测：讲课录音几乎每秒都是说话；礼拜录音的琴声段、体育馆录音的唱歌段判成音乐。加载不了退回音量判断（`L.loudAt`）
+- 用处：① 按句识别时不像说话的段**不送 Whisper**（`flushSeg`）；② "明显有声音却不出字"（`L.loudNoWord`）要最近 1.5 秒判断为说话才累计，放音乐唱歌不再触发重连/切换；③ **待机**：没判断到说话、Deepgram 没出字、Whisper 没出句、超过 60 秒 → `enterStandby`（录音照录，Deepgram 断开不发、Whisper 不发，顶上 💤，状态栏写待机），判断到说话（或退回模式下明显有声音 0.5 秒）→ `wake`：自动切到 Whisper 的改回 Deepgram，补发最近 3 秒（`L.pre`）；点识别按钮也能唤醒；④ 4 分钟第二次"有人说话却不出字"→ `DG.tryWhisper` 把最近 15 秒（`DG.sent`，buf 是 ArrayBuffer 要转 Int16Array）给 Whisper 试认，≥4 个词且那段有说话才切 Whisper；否则没人说话就待机、有人说话就重连
+- 每分钟概况多记"判断有人说话 N 秒、有音乐 N 秒"、"（待机中）"
+- **Whisper 过滤**（`transcribe`）：段的 no_speech_prob>0.5、avg_logprob<-1、(no_speech>0.25 且 logprob<-0.6)、compression_ratio>2.4 都丢；多语言模式下认成非中英文又没把握的丢；`HALLU_ANY` 各语言片尾词（订阅、字幕、ご視聴…）整句丢并记日志
+- **没在 iPad 上测过**：YAMNet 能不能加载、每秒多耗多少电、会不会卡采音
+
 ### 多语言、日志
 - **多语言（实验，默认关，云同步）** `S.multiLang`：Deepgram `language=multi`（这时不加 keyterm，怕被拒），Whisper 不指定语言；每句记主要语言 `l.lang`（英文不记，`addLang` 按词计数；Whisper 没给语言但有中日文字的当中文），显示/导出标语言；中日文词之间去空格（`cjkTight`，内部仍按空格分词，逐词时间对得上）；翻译用 `SYS_PROMPT_MULTI`：中文→英文，其他→中文
 - **日志**：翻译/同步这类刷屏的之外另存 `lt.log2`（`LOG_IMP`），设置页"复制全部日志"一次复制两份（iPad 上从框里选着复制会串行）；显示框只显示最近 150 条
@@ -133,6 +142,7 @@
 ## 待办
 
 ### 等用户上课测试（测完让用户点"复制全部日志"发来）
+- **说话判断和待机**：日志里有没有"说话判断（YAMNet）已加载"；顶上 🗣/🎵 标记准不准；没人说话 1 分钟是否待机（💤）、有人说话是否马上恢复且开头不丢字；iPad 会不会更费电、发热、采音变少
 - **11/2 改的翻译和切换**：还会不会出现"翻译失败"；设置页模型列表里 Qwen 3.8 27B、gpt-oss-20b、Gemini Flash、Gemma 是否"可用"（模型名对不对）；唱歌放音乐时还会不会切 Whisper（日志每分钟概况里有"背景声 xxdB"）；自动切回 Deepgram 是否正常
 - **iPhone 自动音量**：绿色音量条能不能动到一半左右；Deepgram 会不会还是两句后停；日志里"原始音量 / 自动放大 +xxdB / Deepgram 回了几个词"
 - **"近处（通话模式）"** 在 iPhone 上实际效果（手机放老师旁边时）
@@ -146,11 +156,6 @@
 - Groq 的 `timestamp_granularities[]` 在 multipart 里重复两次的写法是按文档推的，没用真 key 试过；如果精修后 Whisper 部分仍只高亮整句，说明没拿到 `words`
 - Deepgram `language=multi` 时能不能带 keyterm（现在是不带）
 - 实时 Whisper（按句识别）没有逐词时间、不标语言（只靠中日文字判断中文）
-
-### 已定、下一批做
-- **Whisper 过滤已收紧**（`transcribe`）：段的 no_speech_prob>0.5、avg_logprob<-1、(no_speech>0.25 且 logprob<-0.6)、compression_ratio>2.4 都丢；多语言模式下认成非中英文又没把握的丢；`HALLU_ANY` 各语言片尾词（订阅、字幕、ご視聴…）出现就整句丢并记日志
-- **第二批（用户已同意做）**：本机判断有没有人说话（YAMNet）→ 不像说话的不送 Whisper；**智能待机**：没人说话超过 1 分钟停识别（录音照录，Deepgram/Whisper 都不发，显示"待机中"），一有人说话马上唤醒、直接用 Deepgram、补发待机时最后 3 秒；**自动切 Whisper 前先让 Whisper 试认那段**，认出正常英文才切，否则进待机
-- **分辨说话 / 音乐 / 唱歌**：网页里跑 YAMNet（MediaPipe 音频分类，约 5–10MB，加载不了退回"听节奏"：说话停顿多、起落快）；像音乐唱歌时不自动切 Whisper；主界面音量条旁显示"🎵 音乐 / 🎤 唱歌 / 🎵+🗣"；不像说话的声音不送 Whisper，并用 Groq 返回的 `no_speech_prob` `avg_logprob` 丢瞎编句
 
 ### 提过、用户还没决定的
 - **开始前选课程**：点"开始"前选是哪门课（比如 HVAC 1084），Drive 里自动放到 `课堂同传/<课程>/<日期>`

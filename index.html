@@ -31,6 +31,7 @@ a{color:#7fb7ff}
 #clock{font-variant-numeric:tabular-nums;color:var(--muted);min-width:64px}
 #level{width:60px;height:6px;background:#2a313a;border-radius:3px;overflow:hidden}
 #level i{display:block;height:100%;width:0;background:var(--accent);transition:width .08s}
+#vadTag{font-size:14px;min-width:1em;white-space:nowrap}
 #prov{color:var(--muted);font-size:12px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #top button{padding:8px 12px}
 
@@ -142,6 +143,7 @@ a{color:#7fb7ff}
   <span class="title">课堂同传</span>
   <span id="clock">00:00</span>
   <span id="level"><i></i></span>
+  <span id="vadTag"></span>
   <span id="prov"></span>
   <button id="btnHistory">历史</button>
   <button id="btnSettings">设置</button>
@@ -714,6 +716,7 @@ const Q = { asr:[], asrBusy:false, trBusy:false };
 function setStatus(msg){ $('#prov').textContent = msg; }
 function updateProv(){
   if (L.state === 'idle' && !Q.asr.length && !Q.tr.length){ setStatus(''); return; }
+  if (L.standby && L.state === 'running'){ setStatus('待机中 · 没人说话（录音照录，有人说话自动恢复）'); return; }
   const live = L.state === 'idle' ? '' : L.engine === 'dg' ? (DG.ws && DG.ws.readyState === 1 ? '实时 · ' : '实时连接中 · ') : '按句 · ';
   const wait = (Q.asr.length ? `待识别 ${Q.asr.length} ` : '') + (Q.tr.length ? `待翻译 ${Q.tr.length} ` : '');
   setStatus(live + wait + (activeProvider ? '翻译：' + activeProvider.name : ''));
@@ -894,14 +897,16 @@ function capTick(){
     // 4 分钟里第二次了：多半是场地回声太大 Deepgram 认不出（实测 Whisper 在这种地方认得出），这节课改用 Whisper 按句识别
     DG.kicks = (DG.kicks || []).filter(x => now - x < 240000).concat(now);
     if (DG.kicks.length >= 2 && S.keys.groq.trim()){
-      DG.toWhisper(`Deepgram 4 分钟里两次明显有声音却不出字（可能回声太大），这节课改用 Groq Whisper 按句识别`);
+      DG.kickAt = now; L.loudNoWord = 0; DG.tryWhisper();
     } else {
       log(`Deepgram：${Math.round(realNow() - DG.lastWordAt)} 秒里有 ${Math.round(L.loudNoWord)} 秒明显有声音，却一个词都没回，重连`);
       DG.kickAt = now; DG.wordsSinceKick = 0; L.loudNoWord = 0; DG.lost();
     }
   }
   // 自动切到 Whisper 的（可能只是在放音乐、唱歌），过一阵再试 Deepgram：5 分钟，又被切走就 10、20 分钟
-  if (L.engine === 'whisper' && L.whisperAt && !L.whisperManual && S.keys.dg.trim() &&
+  // 没人说话超过 1 分钟：待机
+  if (!L.standby && realNow() - Math.max(VAD.lastSpeech(), L.engine === 'dg' ? DG.lastWordAt || 0 : 0, L.lastLineAt || 0, L.wakeAt || 0) > 60) enterStandby();
+  if (L.engine === 'whisper' && !L.standby && L.whisperAt && !L.whisperManual && S.keys.dg.trim() &&
       Date.now() - L.whisperAt > Math.min(20, 5 * 2 ** ((L.whisperN || 1) - 1)) * 60000){
     DG.toDg('自动试着切回 Deepgram 实时识别');
   }
@@ -915,10 +920,10 @@ function capTick(){
     const got = M.sec / ((now - M.at) / 1000), db = M.n ? 10 * Math.log10(M.sq / M.n + 1e-12) : -120;
     const gdb = M.gn ? 20 * Math.log10(M.g / M.gn) : 0;
     const quiet = db + gdb < -40;   // 放大到头了还是很小：麦克风被挡住、离得太远
-    const bad = M.zero > 2 || got < 0.9 || quiet || (L.engine === 'dg' && M.loud > 20 && M.words < 5);
+    const bad = M.zero > 2 || got < 0.9 || quiet || (L.engine === 'dg' && !L.standby && M.loud > 20 && M.words < 5 && (!VAD.ok || (M.vadSp || 0) > 20));
     L.monCount = (L.monCount || 0) + 1;
     if (bad || L.monCount % 5 === 0)
-      log(`${bad ? '⚠ ' : ''}最近 ${Math.round(span)} 秒：收到 ${Math.round(got * 100)}% 的声音，原始音量 ${Math.round(db)}dB，自动放大 +${Math.round(gdb)}dB${quiet ? '（放大后还是太小）' : ''}，${Math.round(M.zero)} 秒全是静音，背景声 ${Math.round(20 * Math.log10(L.nf || 1e-6))}dB，${Math.round(M.loud)} 秒明显有声音` +(L.engine === 'dg' ? `，Deepgram 回了 ${M.words} 个词` : ''));
+      log(`${bad ? '⚠ ' : ''}最近 ${Math.round(span)} 秒：收到 ${Math.round(got * 100)}% 的声音，原始音量 ${Math.round(db)}dB，自动放大 +${Math.round(gdb)}dB${quiet ? '（放大后还是太小）' : ''}，${Math.round(M.zero)} 秒全是静音，背景声 ${Math.round(20 * Math.log10(L.nf || 1e-6))}dB，${Math.round(M.loud)} 秒明显有声音` + (VAD.ok ? `，判断有人说话 ${M.vadSp || 0} 秒、有音乐 ${M.vadMu || 0} 秒` : '') + (L.standby ? '（待机中）' : L.engine === 'dg' ? `，Deepgram 回了 ${M.words} 个词` : ''));
     monReset();
   }
 }
@@ -963,7 +968,9 @@ async function start(){
   capWindowReset();
 
   L.engine = engine;
-  Object.assign(L, {rmsH:[], nf:0, binSq:0, binT:0, whisperAt:0, whisperN:0, whisperManual:false});
+  Object.assign(L, {rmsH:[], nf:0, binSq:0, binT:0, whisperAt:0, whisperN:0, whisperManual:false,
+    standby:false, standbyAt:0, wakeAt:0, pre:[], loudAt:-1e9, loudRun:0, lastLineAt:0});
+  VAD.reset(); VAD.load();
   L.state = 'running';
   log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}`);
   if (engine === 'dg') DG.begin();
@@ -1199,6 +1206,37 @@ const DG = {
     L.whisperAt = Date.now(); L.whisperManual = !!manual; if (!manual) L.whisperN = (L.whisperN || 0) + 1;
     updateProv(); showEngine();
   },
+  // 待机：把这句收尾、关掉连接（不走断线重发），不再发声音
+  sleep(){
+    this.endLine('flush');
+    const ws = this.ws; this.ws = null;
+    if (ws){ ws.onclose = ws.onmessage = null; try { ws.send(JSON.stringify({type:'CloseStream'})); } catch(e){} try { ws.close(); } catch(e){} }
+    clearInterval(this.dog); this.queue = []; this.sent = [];
+  },
+  // 4 分钟里第二次"有人说话却不出字"：先把最近 15 秒给 Whisper 试认，认出正常的英文句子才切过去；
+  // 认不出（多半是音乐、噪音，或者其实没人说话）就不切，没人说话就待机，否则重连再看
+  async tryWhisper(){
+    if (this.verifying) return; this.verifying = true;
+    try {
+      const t1 = realNow(), items = this.sent.filter(it => it.t > t1 - 15);
+      let text = '';
+      if (items.length){
+        const parts = items.map(it => new Int16Array(it.buf)), len = parts.reduce((a, p) => a + p.length, 0), pcm = new Float32Array(len); let o = 0;
+        for (const p of parts){ for (let i = 0; i < p.length; i++) pcm[o + i] = p[i] / 32768; o += p.length; }
+        try { text = await transcribe(encodeWav([pcm], len, 16000), whisperPrompt('')); } catch(e){}
+      }
+      if (L.state !== 'running' || L.engine !== 'dg' || L.standby) return;
+      const n = text.split(/\s+/).filter(Boolean).length;
+      if (n >= 4 && VAD.spoke(t1 - 15, t1)){
+        this.toWhisper(`Deepgram 4 分钟里两次有人说话却不出字，Whisper 试认出了：「${text.slice(0, 50)}」，改用 Groq Whisper 按句识别`);
+      } else if (VAD.ok && realNow() - VAD.speechAt > 20){
+        log(`Deepgram 不出字，Whisper 也没认出正常句子（${n} 个词），像是没人说话，不切换`); enterStandby();
+      } else {
+        log(`Deepgram 不出字，Whisper 也没认出正常句子（${n} 个词），不切换，重连`);
+        this.kickAt = performance.now(); L.loudNoWord = 0; this.lost();
+      }
+    } finally { this.verifying = false; }
+  },
   // 从 Whisper 切回 Deepgram 实时识别
   toDg(why){
     log(why); toast(why, 5000);
@@ -1412,6 +1450,89 @@ function agcApply(f, g){
   return out;
 }
 
+/* ================= 有没有人说话（YAMNet 声音分类，在本机跑，不花钱） ================= */
+// Google 的 YAMNet 能分 500 多种声音，这里只看"说话"和"音乐/唱歌"两类的分数，每秒判断一次。
+// 用处：不像说话的声音不送 Whisper（它会在音乐上瞎编）、不算"有声音却不出字"、没人说话就待机。
+// 加载不了（断网、老设备）就退回音量判断：比背景声明显响就当有人说话
+const VAD_V = '0.10.35';
+const VAD_SPEECH = /^(Speech|Male speech|Female speech|Child speech|Conversation|Narration|Babbling|Whispering|Shout|Yell)/;
+const VAD_MUSIC = /^(Music|Musical instrument|Singing|Song|Choir|Chant|Piano|Organ|Keyboard|Guitar|Drum|Hymn|Gospel|Christian music|Pop music|Background music|Orchestra|Lullaby|Electronic music|Rock music|Strum|Bowed string)/;
+const VAD = {
+  ok:false, loading:null, clf:null, buf:null, n:0, busy:false, fails:0,
+  sp:0, mu:0, kind:'', speechAt:-1e9, hist:[],
+  load(){
+    if (this.ok || this.loading) return this.loading;
+    const base = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-audio@${VAD_V}`;
+    this.loading = import(base + '/audio_bundle.mjs').then(async m => {
+      const fs = await m.FilesetResolver.forAudioTasks(base + '/wasm');
+      this.clf = await m.AudioClassifier.createFromOptions(fs, {baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite'}, maxResults:-1});
+      this.ok = true; log('说话判断（YAMNet）已加载');
+    }).catch(e => { log('说话判断（YAMNet）加载不了，改用音量判断：' + String(e && e.message || e).slice(0, 100)); this.loading = null; });
+    return this.loading;
+  },
+  reset(){ this.buf = null; this.n = 0; this.hist = []; this.speechAt = -1e9; this.sp = this.mu = 0; this.kind = ''; showVad(); },
+  // 攒够 1 秒声音就判断一次（放到下一轮再算，不卡采音）
+  push(f, rate, t){
+    if (!this.ok) return;
+    if (!this.buf || this.buf.length !== rate){ this.buf = new Float32Array(rate); this.n = 0; }
+    let o = 0;
+    while (o < f.length){
+      const k = Math.min(f.length - o, this.buf.length - this.n);
+      this.buf.set(f.subarray(o, o + k), this.n); this.n += k; o += k;
+      if (this.n === this.buf.length){ const a = this.buf.slice(); this.n = 0; if (!this.busy){ this.busy = true; setTimeout(() => this.run(a, rate, t), 0); } }
+    }
+  },
+  run(a, rate, t){
+    try {
+      let sp = 0, mu = 0;
+      for (const r of this.clf.classify(a, rate)) for (const c of (r.classifications[0] || {}).categories || []){
+        if (VAD_SPEECH.test(c.categoryName)) sp = Math.max(sp, c.score);
+        else if (VAD_MUSIC.test(c.categoryName)) mu = Math.max(mu, c.score);
+      }
+      const speech = sp >= 0.3, music = mu >= 0.3;
+      this.sp = sp; this.mu = mu; this.kind = speech && music ? 'mix' : speech ? 'speech' : music ? 'music' : '';
+      if (speech) this.speechAt = t;
+      this.hist.push({t, speech, music}); if (this.hist.length > 90) this.hist.shift();
+      if (L.mon){ L.mon.vadN = (L.mon.vadN || 0) + 1; if (speech) L.mon.vadSp = (L.mon.vadSp || 0) + 1; if (music) L.mon.vadMu = (L.mon.vadMu || 0) + 1; }
+      showVad();
+    } catch(e){ if (++this.fails >= 5){ this.ok = false; log('说话判断出错，改用音量判断：' + e.message); } }
+    this.busy = false;
+  },
+  // 最近一次像有人说话的时间（课堂时间）；YAMNet 不可用时用"明显有声音"代替
+  lastSpeech(){ return this.ok ? this.speechAt : (L.loudAt || -1e9); },
+  // [t0, t1] 这段里有没有人说话（每条判断管它之前的 1 秒）；不可用时一律当有
+  spoke(t0, t1){ return !this.ok || this.hist.some(h => h.speech && h.t > t0 && h.t - 1 < t1); },
+};
+// 顶上音量条旁边：现在听到的是说话、音乐还是两样都有；待机时显示待机
+function showVad(){
+  const e = $('#vadTag'); if (!e) return;
+  e.textContent = L.state === 'idle' ? '' : L.standby ? '💤 待机' : ({speech:'🗣', music:'🎵', mix:'🎵🗣'})[VAD.kind] || '';
+}
+
+// 智能待机：没人说话超过 1 分钟（没判断到说话，Deepgram 也没出字），停掉识别——录音照录，
+// Deepgram 不发（省额度）、Whisper 不发（不会在音乐上瞎编）。一判断到有人说话马上唤醒
+function enterStandby(){
+  if (L.standby || L.state !== 'running') return;
+  log('一分钟没人说话，识别先待机（录音照录，有人说话自动恢复）');
+  L.standby = true; L.standbyAt = realNow(); L.pre = [];
+  if (L.engine === 'dg') DG.sleep(); else L.seg = null;
+  updateProv(); showVad();
+}
+function wake(why){
+  if (!L.standby) return;
+  L.standby = false; L.wakeAt = realNow();
+  // 自动切到 Whisper 的，醒来先用 Deepgram（手动选的 Whisper 不动）
+  const toDg = L.engine === 'whisper' && !L.whisperManual && S.keys.dg.trim();
+  log(`${why}，恢复识别${toDg ? '（改回 Deepgram）' : ''}`);
+  if (toDg) L.engine = 'dg';
+  if (L.engine === 'dg'){
+    DG.begin(); DG.lastWordAt = realNow(); DG.kickAt = performance.now(); L.loudNoWord = 0;
+    for (const p of L.pre) DG.push(p.f, p.t);   // 待机时最后 3 秒补发
+  } else { L.seg = null; L.hist = []; }
+  L.pre = [];
+  updateProv(); showVad(); showEngine();
+}
+
 /* VAD + segmenting（按句识别用） */
 function onFrame(f){
   if (L.state !== 'running') return;
@@ -1429,9 +1550,20 @@ function onFrame(f){
   if (L.binT >= 0.1){ (L.rmsH = L.rmsH || []).push(Math.sqrt(L.binSq / L.binT)); if (L.rmsH.length > 300) L.rmsH.shift(); L.binSq = L.binT = 0; }
   // "明显有声音"：够响，而且比背景声高出一截（约 10dB）。以前只看够不够响，没人说话时
   // 被放大的风机声、音乐也算，Deepgram 正常地不出字，却被当成认不出，切到了 Whisper
-  if (rms > Math.max(0.015, (L.nf || 0) * 3)){ M.loud += fd; L.loudNoWord += fd; }
+  // 有说话判断时，还要最近 1.5 秒判断为有人说话才算（放音乐、唱歌时 Deepgram 不出字是对的）
+  if (rms > Math.max(0.015, (L.nf || 0) * 3)){
+    M.loud += fd; L.loudAt = t + fd; L.loudRun = (L.loudRun || 0) + fd;
+    if (!VAD.ok || t - VAD.speechAt < 1.5) L.loudNoWord += fd;
+  } else L.loudRun = 0;
   $('#level i').style.width = Math.min(100, rms * 900) + '%';
   if (L.mp3) mp3Push(f, t);
+  VAD.push(f, L.rate, t + fd);
+  // 待机：录音照录，识别不发；留最近 3 秒，唤醒时补发，开头的字不丢
+  if (L.standby){
+    L.pre.push({f:new Float32Array(f), t}); while (L.pre.length && L.pre[0].t < t - 3) L.pre.shift();
+    if ((VAD.ok && VAD.speechAt > L.standbyAt) || (!VAD.ok && L.loudRun >= 0.5)) wake('有人说话了');
+    return;
+  }
   if (L.engine === 'dg'){ DG.push(f, t); return; }
   // 门槛取在最近 8 秒的"安静水平"和"大声水平"之间。
   // 老师连续讲课时，安静水平取的是词和句之间的空隙，不会被讲话声越带越高
@@ -1457,6 +1589,8 @@ function onFrame(f){
 function flushSeg(){
   const s = L.seg; L.seg = null;
   if (!s || s.speech < 0.4) return;
+  // 不像有人说话（音乐、唱歌、噪音）就不送 Whisper：它会硬编一句，甚至编出各国语言
+  if (!VAD.spoke(s.startT - 0.5, s.startT + s.len / L.rate + 0.5)){ log(`一段 ${(s.len / L.rate).toFixed(1)} 秒的声音不像有人说话（${VAD.kind === 'music' ? '音乐' : '噪音'}），不送识别`); return; }
   log(`切句 #${L.nextId} ${(s.len / L.rate).toFixed(1)}秒`);
   const line = {id:L.nextId++, t:s.startT, en:'', zh:'', status:'asr'};
   L.lines.push(line); renderLine(line);
@@ -1473,7 +1607,7 @@ async function runAsr(){
       try {
         const text = await transcribe(job.wav, whisperPrompt(prev));
         if (!text){ log(`#${line.id} 没识别出内容，丢掉`); removeLine(job, line); updateProv(); continue; }
-        line.en = text; line.status = 'tr';
+        line.en = text; line.status = 'tr'; L.lastLineAt = realNow();
       } catch(e){ line.en = '（识别失败）'; line.status = 'err'; line.zh = netMsg(e); }
       renderLine(line); dirty(job.session, job.lines);
       if (line.status === 'tr'){ Q.tr.push({line, session:job.session, lines:job.lines}); runTr(); }
@@ -2018,7 +2152,7 @@ function updateButtons(){
   $('#btnPause').textContent = st === 'paused' ? '继续' : '暂停';
   $('#togSave').disabled = st !== 'idle';
   $('#btnMic').style.display = st === 'idle' ? '' : 'none';   // 收音模式点"开始"时才生效，上课中不显示
-  showEngine();
+  showEngine(); showVad();
   if (st === 'idle') $('#clock').textContent = '00:00';
 }
 // 上课中显示现在用哪种识别，点一下切到另一种（两个 key 都有才显示）
@@ -2029,6 +2163,7 @@ function showEngine(){
 }
 $('#btnEng').onclick = () => {
   if (L.state !== 'running'){ toast('点"继续"之后再切'); return; }
+  if (L.standby){ wake('手动唤醒'); return; }
   if (L.engine === 'dg') DG.toWhisper('手动切换到 Groq Whisper 按句识别', true);
   else DG.toDg('手动切回 Deepgram 实时识别');
 };
@@ -2858,6 +2993,7 @@ $('#togSave').checked = S.saveDefault;
 showMicMode();
 updateButtons();
 setTimeout(() => loadLame().catch(() => {}), 2000);   // 录音要用的 MP3 压缩库先备好，点开始时不用等
+setTimeout(() => VAD.load(), 4000);   // 说话判断（YAMNet，约 10MB，第一次下载后浏览器会缓存）
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 DB.allSessions().then(async list => {
   // 本机上次意外中断的标记一下（别的设备正在录的不管）
