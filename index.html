@@ -838,15 +838,16 @@ function capTick(){
   }
   // 连续 5 秒收到的全是 0：iPad 把网页的声音断了（来电、通知、别的 App 占用麦克风），重新接
   if (L.zeroRun >= 5 && now - (L.fixAt || 0) > 20000){ L.fixAt = now; micFix(); }
-  // 明显有人在说话，Deepgram 却 30 秒一个词都没回：连接多半卡住了，重连（没定稿的声音会重发）
-  if (L.engine === 'dg' && DG.ws && DG.ws.readyState === 1 && L.loudNoWord >= 15 && realNow() - DG.lastWordAt > 30 && now - (DG.kickAt || 0) > 60000){
+  // 明显有人在说话，Deepgram 却 15 秒一个词都没回：连接多半卡住了，重连（没定稿的声音会重发）。
+  // 实测 11/2：连接正常、一直回空结果将近 1 分钟，重连后马上又认得出，所以等 15 秒就重连（以前 30 秒）
+  if (L.engine === 'dg' && DG.ws && DG.ws.readyState === 1 && L.loudNoWord >= 8 && realNow() - DG.lastWordAt > 15 && now - (DG.kickAt || 0) > 30000){
     // 4 分钟里第二次了：多半是场地回声太大 Deepgram 认不出（实测 Whisper 在这种地方认得出），这节课改用 Whisper 按句识别
     DG.kicks = (DG.kicks || []).filter(x => now - x < 240000).concat(now);
     if (DG.kicks.length >= 2 && S.keys.groq.trim()){
       DG.toWhisper(`Deepgram 4 分钟里两次明显有声音却不出字（可能回声太大），这节课改用 Groq Whisper 按句识别`);
     } else {
       log(`Deepgram：${Math.round(realNow() - DG.lastWordAt)} 秒里有 ${Math.round(L.loudNoWord)} 秒明显有声音，却一个词都没回，重连`);
-      DG.kickAt = now; L.loudNoWord = 0; DG.lost();
+      DG.kickAt = now; DG.wordsSinceKick = 0; L.loudNoWord = 0; DG.lost();
     }
   }
   // 自动切到 Whisper 的（可能只是在放音乐、唱歌），过一阵再试 Deepgram：5 分钟，又被切走就 10、20 分钟
@@ -939,6 +940,7 @@ function resume(){
   L.pausedMs += performance.now() - L.pausedAt;
   L.state = 'running';
   capWindowReset();
+  DG.lastMsgAt = Date.now();   // 暂停时 Deepgram 本来就不回话，别一继续就当成"N 秒没回应"去重连
   if (L.mime && !L.mp3) recStart();
   updateButtons();
 }
@@ -1194,14 +1196,20 @@ const DG = {
       return;
     }
     // ---- 定稿 ----
-    if (words.length){ this.lastWordAt = realNow(); L.loudNoWord = 0; if (L.mon) L.mon.words += words.length; }
+    if (words.length){
+      this.lastWordAt = realNow(); L.loudNoWord = 0; if (L.mon) L.mon.words += words.length;
+      // 重连后又正常出了 20 个词：上次是一时卡住，不算进"4 分钟两次就改用 Whisper"
+      if ((this.wordsSinceKick = (this.wordsSinceKick || 0) + words.length) >= 20) this.kicks = [];
+    }
     const fe = this.realT((m.start || 0) + (m.duration || 0));
     if (fe > this.confirmed) this.confirmed = fe;
     // C：这段里刚才显示过、定稿却删掉的词，不让它凭空消失，留成淡色的"存疑"（⟦…⟧ 包起来）
     // 跟显示过的所有灰字比（不只最新一版），定稿结束之前的都算在这段里
     const prev = this.cur ? (this.cur.seen || this.cur.im).filter(w => w.s < fe) : [];
     // 同一个词：开始时间差不多，或者开始时间落在定稿某个词的中间
-    const dropped = prev.filter(p => !words.some(k => Math.abs(k.s - p.s) < 0.12 || (p.s >= k.s && p.s < k.e - 0.05)));
+    // 或者是同一个词、时间挪了一点（1 秒内）：定稿常把灰字的时间改一点，以前会多出一个"Once (Once?)"
+    const norm = w => w.toLowerCase().replace(/[^\p{L}\p{N}']/gu, '');
+    const dropped = prev.filter(p => !words.some(k => Math.abs(k.s - p.s) < 0.12 || (p.s >= k.s && p.s < k.e - 0.05) || (Math.abs(k.s - p.s) < 1 && norm(k.w) === norm(p.w))));
     const all = words.map(w => ({...w, doubt:false})).concat(dropped.map(w => ({...w, doubt:true, spk:undefined}))).sort((a, b) => a.s - b.s);
     // D：按说话人分段，换人就另起一行
     for (const w of all){
