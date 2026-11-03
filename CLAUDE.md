@@ -55,6 +55,7 @@
 | `showEngine` `#btnEng` | 上课中手动切 Deepgram / Whisper 的按钮 |
 | `/* === 有没有人说话` `VAD` `VAD_SPEECH` `VAD_MUSIC` `showVad` `#vadTag` | 本机说话判断（YAMNet）：每秒一次说话/音乐分数、顶上 🗣/🎵/💤 标记 |
 | `enterStandby` `wake` `DG.sleep` `DG.tryWhisper` | 智能待机/唤醒；自动切 Whisper 前先试认 |
+| `soundTags` `addTag` `TAG_EL` `.stag` | 字幕里的声音标记（笑声、掌声、音乐起止、待机时段） |
 | `onFrame` `flushSeg` `runAsr` `runTr` `dirty` | 每块声音的处理（先自动音量）、按句切段、识别队列、翻译队列、保存（存 `ws` `lang`） |
 | `const Cloud = {` `syncOnce` | Google 登录、Drive 同步（设置、记录、录音、文字记录、合成整节课录音） |
 | `/* === rendering` `enHtml` `lineHtml` `renderLine` `typeTick` `markRecent` `setStick` `showJump` | 字幕显示、逐词打字效果、正在说的句子突出、自动跟随最新 |
@@ -99,6 +100,7 @@
 ### 说话判断、智能待机（11/2 做的第二批）
 - **YAMNet**（MediaPipe `@mediapipe/tasks-audio@0.10.35`，jsdelivr；模型 storage.googleapis.com `yamnet/float32/1`，约 4MB + wasm 6MB，页面打开 4 秒后预加载）：每攒 1 秒声音判断一次（setTimeout 里跑，电脑上约 8ms），说话类最高分 ≥0.3 算说话、音乐类 ≥0.3 算音乐。实测：讲课录音几乎每秒都是说话；礼拜录音的琴声段、体育馆录音的唱歌段判成音乐。加载不了退回音量判断（`L.loudAt`）
 - 用处：① 按句识别时不像说话的段**不送 Whisper**（`flushSeg`）；② "明显有声音却不出字"（`L.loudNoWord`）要最近 1.5 秒判断为说话才累计，放音乐唱歌不再触发重连/切换；③ **待机**：没判断到说话、Deepgram 没出字、Whisper 没出句、超过 60 秒 → `enterStandby`（录音照录，Deepgram 断开不发、Whisper 不发，顶上 💤，状态栏写待机），判断到说话（或退回模式下明显有声音 0.5 秒）→ `wake`：自动切到 Whisper 的改回 Deepgram，补发最近 3 秒（`L.pre`）；点识别按钮也能唤醒；④ 4 分钟第二次"有人说话却不出字"→ `DG.tryWhisper` 把最近 15 秒（`DG.sent`，buf 是 ArrayBuffer 要转 Int16Array）给 Whisper 试认，≥4 个词且那段有说话才切 Whisper；否则没人说话就待机、有人说话就重连
+- **声音标记**（设置"声音标记" `S.soundTags`，默认关，不云同步）：YAMNet 笑声/掌声 ≥0.3 标"😄 笑声""👏 掌声"（同类 15 秒内只标一次）；音乐连着 3 秒标"🎵 音乐"、连着 5 秒没有标"🎵 音乐停了"；待机时段**总是标**（"💤 mm:ss–mm:ss 没人说话"）。存在 `session.tags`（`{t, tag}`，跟着云同步），主界面插在正在说的那句前面，历史记录按时间插在句子之间（`.stag` 不是 `.line`，不影响 HL 按序号找句子），导出写成 `[笑声]`。DOM 元素放 `TAG_EL`（WeakMap），不能放进 tag 对象（IndexedDB 存不了）
 - 每分钟概况多记"判断有人说话 N 秒、有音乐 N 秒"、"（待机中）"
 - **Whisper 过滤**（`transcribe`）：段的 no_speech_prob>0.5、avg_logprob<-1、(no_speech>0.25 且 logprob<-0.6)、compression_ratio>2.4 都丢；多语言模式下认成非中英文又没把握的丢；`HALLU_ANY` 各语言片尾词（订阅、字幕、ご視聴…）整句丢并记日志
 - **没在 iPad 上测过**：YAMNet 能不能加载、每秒多耗多少电、会不会卡采音

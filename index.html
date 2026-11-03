@@ -69,6 +69,8 @@ a{color:#7fb7ff}
 #subs.follow .line.f3{opacity:.4}
 #subs.follow .line.f4{opacity:.3}
 #subs.follow{-webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 70px);mask-image:linear-gradient(to bottom, transparent 0, #000 70px)}
+.stag{color:var(--muted);font-size:13px;text-align:center;margin:-6px 0 14px}
+#subs.follow .stag{opacity:.6}
 #jump{position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom) + 96px);display:none;background:#2d6b4a}
 
 /* bottom bar */
@@ -268,6 +270,7 @@ a{color:#7fb7ff}
       <div class="row"><label>字号</label><input type="range" id="fs" min="16" max="36" step="1"><span id="fsV" class="hint"></span></div>
       <div class="row"><label>中文亮度</label><input type="range" id="zhOp" min="0.2" max="1" step="0.05"><span id="zhOpV" class="hint"></span></div>
       <div class="row"><label>正在说的句子</label><input type="range" id="curScale" min="1" max="1.5" step="0.05"><span id="curScaleV" class="hint"></span></div>
+      <div class="row"><label>声音标记</label><input type="checkbox" id="soundTags" style="width:20px;height:20px"><span class="hint">字幕里标出笑声、掌声、音乐开始和停止（没人说话的待机时段总会标）</span></div>
       <div class="row"><label>突出颜色</label><select id="curColor"><option value="amber">琥珀色</option><option value="green">绿色</option><option value="blue">蓝色</option><option value="none">不加色条</option></select></div>
       <div class="row"><label>默认保存</label><input type="checkbox" id="saveDefault" style="width:20px;height:20px"><span class="hint">开始时"保存"开关的默认状态</span></div>
     </div>
@@ -368,7 +371,7 @@ const DEFAULTS = {
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
   showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3, keepDays:30,
-  curScale:1.15, curColor:'amber', prefModel:'',
+  curScale:1.15, curColor:'amber', prefModel:'', soundTags:false,
 };
 let S;
 function loadSettings(){
@@ -969,7 +972,8 @@ async function start(){
 
   L.engine = engine;
   Object.assign(L, {rmsH:[], nf:0, binSq:0, binT:0, whisperAt:0, whisperN:0, whisperManual:false,
-    standby:false, standbyAt:0, wakeAt:0, pre:[], loudAt:-1e9, loudRun:0, lastLineAt:0});
+    standby:false, standbyAt:0, wakeAt:0, pre:[], loudAt:-1e9, loudRun:0, lastLineAt:0, tags:[], tagSt:null, sbTag:null});
+  if (L.session) L.session.tags = L.tags;
   VAD.reset(); VAD.load();
   L.state = 'running';
   log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}`);
@@ -1456,6 +1460,7 @@ function agcApply(f, g){
 // 加载不了（断网、老设备）就退回音量判断：比背景声明显响就当有人说话
 const VAD_V = '0.10.35';
 const VAD_SPEECH = /^(Speech|Male speech|Female speech|Child speech|Conversation|Narration|Babbling|Whispering|Shout|Yell)/;
+const VAD_LAUGH = /^(Laughter|Baby laughter|Giggle|Snicker|Belly laugh|Chuckle)/, VAD_CLAP = /^(Applause|Clapping|Cheering)/;
 const VAD_MUSIC = /^(Music|Musical instrument|Singing|Song|Choir|Chant|Piano|Organ|Keyboard|Guitar|Drum|Hymn|Gospel|Christian music|Pop music|Background music|Orchestra|Lullaby|Electronic music|Rock music|Strum|Bowed string)/;
 const VAD = {
   ok:false, loading:null, clf:null, buf:null, n:0, busy:false, fails:0,
@@ -1484,11 +1489,15 @@ const VAD = {
   },
   run(a, rate, t){
     try {
-      let sp = 0, mu = 0;
+      let sp = 0, mu = 0, la = 0, ap = 0;
       for (const r of this.clf.classify(a, rate)) for (const c of (r.classifications[0] || {}).categories || []){
-        if (VAD_SPEECH.test(c.categoryName)) sp = Math.max(sp, c.score);
-        else if (VAD_MUSIC.test(c.categoryName)) mu = Math.max(mu, c.score);
+        const nm = c.categoryName;
+        if (VAD_SPEECH.test(nm)) sp = Math.max(sp, c.score);
+        else if (VAD_MUSIC.test(nm)) mu = Math.max(mu, c.score);
+        else if (VAD_LAUGH.test(nm)) la = Math.max(la, c.score);
+        else if (VAD_CLAP.test(nm)) ap = Math.max(ap, c.score);
       }
+      soundTags(t, mu >= 0.3, la >= 0.3, ap >= 0.3);
       const speech = sp >= 0.3, music = mu >= 0.3;
       this.sp = sp; this.mu = mu; this.kind = speech && music ? 'mix' : speech ? 'speech' : music ? 'music' : '';
       if (speech) this.speechAt = t;
@@ -1509,18 +1518,46 @@ function showVad(){
   e.textContent = L.state === 'idle' ? '' : L.standby ? '💤 待机' : ({speech:'🗣', music:'🎵', mix:'🎵🗣'})[VAD.kind] || '';
 }
 
+// 字幕里插的声音标记（设置里"标出笑声、掌声、音乐"，默认关；待机的时间段总是标）：
+// 一行灰色小字，不翻译，存在 session.tags（{t, tag}），历史记录和导出里按时间插进去
+function soundTags(t, music, laugh, clap){
+  if (L.state !== 'running' || !S.soundTags) return;
+  const T = L.tagSt || (L.tagSt = {mOn:false, mRun:0, nRun:0, last:{}});
+  const once = (k, txt) => { if (t - (T.last[k] || -1e9) > 15){ T.last[k] = t; addTag(t, txt); } };
+  if (laugh) once('laugh', '😄 笑声');
+  if (clap) once('clap', '👏 掌声');
+  // 音乐：连着 3 秒才算开始，连着 5 秒没有才算停（免得一两秒的误判来回标）
+  if (music){ T.mRun++; T.nRun = 0; if (!T.mOn && T.mRun >= 3){ T.mOn = true; addTag(t - 3, '🎵 音乐'); } }
+  else { T.nRun++; T.mRun = 0; if (T.mOn && T.nRun >= 5){ T.mOn = false; addTag(t - 5, '🎵 音乐停了'); } }
+}
+function addTag(t, tag){
+  const g = {t:Math.max(0, Math.round(t * 10) / 10), tag};
+  L.tags.push(g); if (L.session) L.session.tags = L.tags;
+  const box = $('#subs'), el = document.createElement('div'), ls = L.lines, last = ls[ls.length - 1];
+  el.className = 'stag'; el.textContent = tag; TAG_EL.set(g, el);   // 元素不能放进 g（要存进数据库）
+  // 正在说的那句还没说完，标记放在它前面
+  const cur = last && (last.status === 'live' || last.status === 'asr') && document.getElementById('ln' + last.id);
+  if (cur) box.insertBefore(el, cur); else box.appendChild(el);
+  if (stick) box.scrollTop = box.scrollHeight;
+  if (L.session) dirty(L.session, L.lines);
+  return g;
+}
+const TAG_EL = new WeakMap();
+
 // 智能待机：没人说话超过 1 分钟（没判断到说话，Deepgram 也没出字），停掉识别——录音照录，
 // Deepgram 不发（省额度）、Whisper 不发（不会在音乐上瞎编）。一判断到有人说话马上唤醒
 function enterStandby(){
   if (L.standby || L.state !== 'running') return;
   log('一分钟没人说话，识别先待机（录音照录，有人说话自动恢复）');
   L.standby = true; L.standbyAt = realNow(); L.pre = [];
+  L.sbTag = addTag(L.standbyAt - 60, '💤 没人说话，识别待机中');
   if (L.engine === 'dg') DG.sleep(); else L.seg = null;
   updateProv(); showVad();
 }
 function wake(why){
   if (!L.standby) return;
   L.standby = false; L.wakeAt = realNow();
+  if (L.sbTag){ L.sbTag.tag = `💤 ${fmtT(L.sbTag.t)}–${fmtT(L.wakeAt)} 没人说话`; const e = TAG_EL.get(L.sbTag); if (e) e.textContent = L.sbTag.tag; L.sbTag = null; if (L.session) dirty(L.session, L.lines); }
   // 自动切到 Whisper 的，醒来先用 Deepgram（手动选的 Whisper 不动）
   const toDg = L.engine === 'whisper' && !L.whisperManual && S.keys.dg.trim();
   log(`${why}，恢复识别${toDg ? '（改回 Deepgram）' : ''}`);
@@ -1871,7 +1908,7 @@ const Cloud = {
     // 历史记录：一节课一个文件，谁新用谁的（录音在下面单独传）
     const local = (await DB.allSessions()) || [];
     const localIds = new Set(local.map(s => s.id));
-    const pack = s => Object.assign({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], updatedAt:s.updatedAt || 0},
+    const pack = s => Object.assign({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], tags:s.tags || [], updatedAt:s.updatedAt || 0},
       s.refined ? {refined:s.refined, liveLines:s.liveLines} : {});
     for (const s0 of local){
       const live = L.state !== 'idle' && L.session && L.session.id === s0.id;
@@ -2806,7 +2843,10 @@ function renderSessLines(){
   if (!curSess) return;
   const lines = P.view === 'live' && curSess.liveLines ? curSess.liveLines : (curSess.lines || []);
   const box = $('#sessLines');
-  box.innerHTML = lines.map((l, i) => `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}${spkTag(l.spk)}${langTag(lineLang(l))}</div><div class="en">${enWordsHtml(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') || '<div class="hint">没有内容</div>';
+  // 声音标记（笑声、音乐、待机）按时间插在句子之间；不是 .line，不影响按序号找句子
+  const tags = (curSess.tags || []).slice().sort((a, b) => a.t - b.t); let ti = 0;
+  const tagHtml = upTo => { let h = ''; while (ti < tags.length && tags[ti].t < upTo) h += `<div class="stag">${esc(tags[ti++].tag)}</div>`; return h; };
+  box.innerHTML = (lines.map((l, i) => tagHtml(l.t) + `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}${spkTag(l.spk)}${langTag(lineLang(l))}</div><div class="en">${enWordsHtml(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') + tagHtml(Infinity)) || '<div class="hint">没有内容</div>';
   Object.assign(HL, {lines, times:[], els:[...box.querySelectorAll('.line')], li:-1, wi:-1});
   if (P.i >= 0) plHL(plCur(), true);   // 精修中途重画了，高亮接着
   // 点一个词：从这个词开始播；点这句的别处：从句首播
@@ -2845,7 +2885,9 @@ function sessionText(s){
   const head = `${s.title}\n${new Date(s.createdAt).toLocaleString()}  时长 ${fmtT(s.duration || 0)}\n\n`;
   const plain = t => cjkTight((t || '').replace(/⟦([^⟧]*)⟧?/g, '($1?)'));   // 存疑的词写成 (xxx?)
   const lang = c => { c = langCode(c); return c && c !== 'en' ? `[${LANG_NAMES[c] || c.toUpperCase()}] ` : ''; };
-  return head + (s.lines || []).map(l => `[${fmtT(l.t)}] ${spkName(l.spk) ? spkName(l.spk) + '：' : ''}${lang(lineLang(l))}${plain(l.en)}\n${l.zh || ''}\n`).join('\n');
+  const items = (s.lines || []).map(l => ({t:l.t, s:`[${fmtT(l.t)}] ${spkName(l.spk) ? spkName(l.spk) + '：' : ''}${lang(lineLang(l))}${plain(l.en)}\n${l.zh || ''}\n`}))
+    .concat((s.tags || []).map(g => ({t:g.t, s:`[${fmtT(g.t)}] [${g.tag.replace(/^\S+\s/, '')}]\n`})));   // 声音标记写成 [笑声]
+  return head + items.sort((a, b) => a.t - b.t).map(x => x.s).join('\n');
 }
 $('#btnExportTxt').onclick = () => {
   if (!curSess) return;
@@ -2891,7 +2933,7 @@ function fillSettings(){
   $('#glossary').value = S.glossary;
   $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
   $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
-  $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor;
+  $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor; $('#soundTags').checked = !!S.soundTags;
   $('#prefModel').innerHTML = '<option value="">自动（按下面的顺序）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#prefModel').value = S.prefModel || '';
   $('#saveDefault').checked = S.saveDefault;
@@ -2936,6 +2978,7 @@ $('#sens').oninput = () => { S.sensitivity = +$('#sens').value; $('#sensV').text
 $('#glossary').onchange = () => { S.glossary = $('#glossary').value; saveSettings(); };
 $('#fs').oninput = () => { S.fontSize = +$('#fs').value; $('#fsV').textContent = S.fontSize + 'px'; applyDisplay(); saveSettings(); };
 $('#curScale').oninput = () => { S.curScale = +$('#curScale').value; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; applyDisplay(); saveSettings(); };
+$('#soundTags').onchange = () => { S.soundTags = $('#soundTags').checked; saveSettings(); };
 $('#curColor').onchange = () => { S.curColor = $('#curColor').value; applyDisplay(); saveSettings(); };
 $('#prefModel').onchange = () => { S.prefModel = $('#prefModel').value; saveSettings(); };
 $('#zhOp').oninput = () => { S.zhOpacity = +$('#zhOp').value; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%'; applyDisplay(); saveSettings(); };
