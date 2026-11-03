@@ -1177,7 +1177,15 @@ const DG = {
   },
   onMsg(data){
     let m; try { m = JSON.parse(data); } catch(e){ return; }
-    if (m.type === 'UtteranceEnd'){ if (this.cur && !this.cur.im.length) this.endLine(); return; }   // 停顿了，而且后面没有新词
+    // 停顿了（1 秒），而且后面没有新词：句子说完了（句号问号叹号结尾）就断；
+    // 没说完就再等 1.5 秒，还是没新词才断（以前一停就断，老师句子中间想个词就被切成两半）
+    if (m.type === 'UtteranceEnd'){
+      const c = this.cur;
+      if (!c || c.im.length) return;
+      if (SENT_END.test(c.line.en)) this.endLine();
+      else { const en = c.line.en; clearTimeout(this.pauseT); this.pauseT = setTimeout(() => { if (this.cur === c && c.line.en === en && !c.im.length) this.endLine(); }, 1500); }
+      return;
+    }
     if (m.type !== 'Results') return;
     const alt = m.channel && m.channel.alternatives && m.channel.alternatives[0];
     const tx = ((alt && alt.transcript) || '').trim();
@@ -1223,11 +1231,16 @@ const DG = {
     if (kept.length) log(`定稿删掉了一整串灰字，照常显示：${kept.map(w => w.w).join(' ')}`);
     const doubtful = dropped.filter(p => !kept.includes(p));
     const all = words.map(w => ({...w, doubt:false})).concat(kept.map(w => ({...w, doubt:false})), doubtful.map(w => ({...w, doubt:true, spk:undefined}))).sort((a, b) => a.s - b.s);
-    // D：按说话人分段，换人就另起一行
-    for (const w of all){
-      const spk = S.diarize && !w.doubt ? w.spk : undefined;
+    // D：按说话人分段，换人就另起一行。新说话人要连着说 3 个词以上才算换人，
+    // 一两个词被错认成别人的不拆句（当成这一行的说话人）
+    all.forEach((w, i) => {
+      let spk = S.diarize && !w.doubt ? w.spk : undefined;
       if (!this.cur) this.newLine(w.s, spk);
       const c = this.cur;
+      if (spk !== undefined && c.line.spk !== undefined && spk !== c.line.spk){
+        let run = 0; for (let j = i; j < all.length && run < 3; j++){ if (all[j].doubt) continue; if (all[j].spk === spk) run++; else break; }
+        if (run < 3) spk = c.line.spk;
+      }
       if (spk !== undefined && c.line.spk !== undefined && spk !== c.line.spk && c.line.en){
         const keep = c.seen || c.im; c.im = c.seen = []; this.endLine(); this.newLine(w.s, spk); this.cur.im = this.cur.seen = keep;
       } else if (spk !== undefined && c.line.spk === undefined) c.line.spk = spk;
@@ -1236,7 +1249,7 @@ const DG = {
       line.en = line.en ? (w.doubt && /⟧$/.test(line.en) ? line.en.slice(0, -1) + ' ' + w.w + '⟧' : line.en + ' ' + piece) : piece;
       addWordTimes(line, w);
       if (!w.doubt) addLang(line, w.lang);
-    }
+    });
     if (doubtful.length) log(`识别删掉了 ${doubtful.length} 个词，留成存疑：${doubtful.map(w => w.w).join(' ')}`);
     const c = this.cur; if (!c) return;
     c.im = c.seen = (c.seen || c.im).filter(w => w.s >= fe);   // 定稿范围之后的灰字留着，不闪
@@ -1245,6 +1258,26 @@ const DG = {
     // 断行只看句子：句号/问号/叹号结尾（至少 4 个词，中文的。？！也算），或者太长了
     const n = c.line.en.split(/\s+/).filter(Boolean).length;
     if ((SENT_END.test(c.line.en) && n >= 4) || n >= 40 || (n && this.confirmed - c.line.t > 25 && m.speech_final)) this.endLine('carry');
+    else if (n > 25) this.splitAtComma();
+  },
+  // 一口气说了 25 个词以上还没句号：在最近的逗号处断开（逗号前至少 8 个词），后半截留在新的一行接着攒
+  splitAtComma(){
+    const c = this.cur, line = c.line, toks = splitW(line.en);
+    let k = -1, open = 0;
+    toks.forEach((t, i) => {
+      if (t.startsWith('⟦')) open++;
+      if (open === 0 && i >= 7 && i < toks.length - 1 && /[,，;；:：]$/.test(t)) k = i;
+      if (t.endsWith('⟧')) open = 0;
+    });
+    if (k < 0) return;
+    const ws = line.ws, restEn = toks.slice(k + 1).join(' '), restWs = ws ? ws.slice(k + 1) : null;
+    line.en = toks.slice(0, k + 1).join(' '); if (ws) line.ws = ws.slice(0, k + 1);
+    const keep = c.seen || c.im; c.im = c.seen = [];
+    this.endLine();
+    this.newLine(restWs && restWs.length ? restWs[0] : line.t, line.spk);
+    const nl = this.cur.line; nl.en = restEn; if (restWs) nl.ws = restWs;
+    this.cur.im = this.cur.seen = keep; nl.im = keep.map(w => w.w).join(' ');
+    renderLine(nl);
   },
   newLine(t, spk){
     const line = {id:L.nextId++, t, en:'', im:'', zh:'', status:'live'};
