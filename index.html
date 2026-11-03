@@ -13,7 +13,7 @@
 :root{
   --bg:#0d0f12; --panel:#161a20; --line:#232a33; --text:#eef1f4; --muted:#7d8794;
   --accent:#3fa36b; --warn:#d9a441; --danger:#d0574f;
-  --fs:22px; --zh-op:.55;
+  --fs:22px; --zh-op:.55; --cur-x:1.15; --cur-c:#d9a441;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
@@ -56,11 +56,18 @@ a{color:#7fb7ff}
 .clickable .line:active,.clickable .line.playing{background:#1b222b}
 /* 上课时：正在说的那句放大、左边琥珀色条；刚说完的两句和中文全亮；跟随最新时更早的调暗 */
 #subs .line{border-left:3px solid transparent;padding-left:10px;margin-left:-13px;transition:opacity .3s}
-#subs .line.cur{border-left-color:var(--warn)}
-#subs .line.cur .en{font-size:calc(var(--fs) * 1.15)}
+#subs .line.cur{border-left-color:var(--cur-c)}
+#subs .line.cur .en{font-size:calc(var(--fs) * var(--cur-x))}
 #subs .line.cur .en .im{color:#aeb7c2}
 #subs .line.cur .zh,#subs .line.recent .zh{opacity:max(var(--zh-op), .9)}
-#subs.follow .line:not(.cur):not(.recent){opacity:.45}
+/* 越旧越淡（f1~f4），再往上 .25；顶上一截渐变消失。往回翻时（没有 .follow）全亮 */
+#subs.follow .line{opacity:.25}
+#subs.follow .line.cur,#subs.follow .line.recent{opacity:1}
+#subs.follow .line.f1{opacity:.75}
+#subs.follow .line.f2{opacity:.55}
+#subs.follow .line.f3{opacity:.4}
+#subs.follow .line.f4{opacity:.3}
+#subs.follow{-webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 70px);mask-image:linear-gradient(to bottom, transparent 0, #000 70px)}
 #jump{position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom) + 96px);display:none;background:#2d6b4a}
 
 /* bottom bar */
@@ -242,6 +249,8 @@ a{color:#7fb7ff}
 
     <div class="sec">
       <h3>翻译模型（从上往下依次尝试，限流自动换下一个）</h3>
+      <div class="row"><label>首选模型</label><select id="prefModel"></select></div>
+      <div class="hint">选了就先用它，被限流或出错时还是按下面的顺序换别的，不会翻不出来。</div>
       <div id="provList"></div>
       <div class="hint">模型名一般不用改。哪家改了模型名或下线了，在这里改成新名字。</div>
     </div>
@@ -256,6 +265,8 @@ a{color:#7fb7ff}
       <h3>显示</h3>
       <div class="row"><label>字号</label><input type="range" id="fs" min="16" max="36" step="1"><span id="fsV" class="hint"></span></div>
       <div class="row"><label>中文亮度</label><input type="range" id="zhOp" min="0.2" max="1" step="0.05"><span id="zhOpV" class="hint"></span></div>
+      <div class="row"><label>正在说的句子</label><input type="range" id="curScale" min="1" max="1.5" step="0.05"><span id="curScaleV" class="hint"></span></div>
+      <div class="row"><label>突出颜色</label><select id="curColor"><option value="amber">琥珀色</option><option value="green">绿色</option><option value="blue">蓝色</option><option value="none">不加色条</option></select></div>
       <div class="row"><label>默认保存</label><input type="checkbox" id="saveDefault" style="width:20px;height:20px"><span class="hint">开始时"保存"开关的默认状态</span></div>
     </div>
 
@@ -355,6 +366,7 @@ const DEFAULTS = {
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
   showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3, keepDays:30,
+  curScale:1.15, curColor:'amber', prefModel:'',
 };
 let S;
 function loadSettings(){
@@ -366,7 +378,7 @@ function loadSettings(){
   S.models = Object.assign({}, saved.models || {});
 }
 // 这些跟着账号走，云同步；字号、中文亮度等显示设置、收音模式（每台设备放的位置不一样）每台设备各自保存
-const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'diarize', 'multiLang', 'models', 'enabled', 'glossary', 'sensitivity'];
+const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'diarize', 'multiLang', 'models', 'enabled', 'prefModel', 'glossary', 'sensitivity'];
 const syncPart = () => JSON.stringify(SYNC_KEYS.map(k => S[k]));
 let lastSyncPart = '';
 function saveSettings(){
@@ -375,10 +387,13 @@ function saveSettings(){
   try { localStorage.setItem('lt.settings', JSON.stringify(S)); } catch(e){ toast('设置保存失败：' + e.message); }
 }
 const modelOf = p => (S.models[p.id] || p.model).trim();
+const CUR_COLORS = {amber:'#d9a441', green:'#3fa36b', blue:'#5b9cf0', none:''};
 
 function applyDisplay(){
   document.documentElement.style.setProperty('--fs', S.fontSize + 'px');
   document.documentElement.style.setProperty('--zh-op', S.zhOpacity);
+  document.documentElement.style.setProperty('--cur-x', S.curScale);
+  document.documentElement.style.setProperty('--cur-c', CUR_COLORS[S.curColor] || 'transparent');
   document.body.classList.toggle('hide-zh', !S.showZh);
   $('#togZh').checked = S.showZh;
 }
@@ -472,6 +487,8 @@ const netMsg = e => e.name === 'AbortError' ? '超时' : (e.status ? e.message :
 
 /* ================= ASR (Groq Whisper) ================= */
 const HALLU = /^(thank you\.?|thanks( for watching)?\.?|you|bye\.?|okay\.?|so\.?|um\.?|uh\.?|\.+|subtitles by.*|.*amara\.org.*)$/i;
+// Whisper 在没人说话时常编的视频片尾词（各种语言），出现在句子里就整句丢
+const HALLU_ANY = /subscribe|thanks? for watching|like and share|amara\.org|字幕|ご視聴|チャンネル登録|sous-titr|продолжение следует|спасибо за просмотр|MBC 뉴스|시청해 주셔서|谢谢观看|謝謝觀看|点赞|訂閱|订阅/i;
 
 function encodeWav(chunks, len, rate){
   const merged = new Float32Array(len); let o = 0;
@@ -520,11 +537,15 @@ async function transcribe(wav, prompt){
       log(`识别 ${((Date.now() - t0) / 1000).toFixed(1)}秒`);
       const j = await res.json();
       const segs = Array.isArray(j.segments) ? j.segments : null;
+      // 没人说话（音乐、噪音）时 Whisper 也硬编一句：可疑的段都丢掉（以前要"没人说话的可能性">0.6 且很没把握才丢，
+      // 实测音乐上编出 "Fast and Furious"）。多语言模式下不是中英文、又没把握的，多半是在音乐上乱猜语言
+      const lang = String(j.language || '').toLowerCase(), odd = S.multiLang && lang && !/^(en|english|zh|chinese)/.test(lang);
       let text = segs
-        ? segs.filter(s => !(s.no_speech_prob > 0.6 && s.avg_logprob < -0.8) && !(s.compression_ratio > 2.6)).map(s => s.text).join(' ')
+        ? segs.filter(s => !(s.no_speech_prob > 0.5 || s.avg_logprob < -1 || (s.no_speech_prob > 0.25 && s.avg_logprob < -0.6) || s.compression_ratio > 2.4
+            || (odd && (s.no_speech_prob > 0.15 || s.avg_logprob < -0.5)))).map(s => s.text).join(' ')
         : (j.text || '');
       text = text.replace(/\s+/g, ' ').trim();
-      if (HALLU.test(text)) text = '';
+      if (HALLU.test(text) || HALLU_ANY.test(text)){ if (text) log(`Whisper 像是瞎编，丢掉：${text.slice(0, 60)}`); text = ''; }
       return text;
     } catch(e){
       if (e.status === 401 || e.status === 403){ toast('Groq key 无效，请在设置里检查'); throw e; }
@@ -640,7 +661,9 @@ const coolLeft = () => Math.min(...PROVIDERS.filter(p => S.enabled[p.id] && (S.k
 
 async function translateWithFallback(sys, user){
   let lastErr = null, tried = 0;
-  for (const p of PROVIDERS){
+  // 设置里选了首选模型就先试它，其余照原来的顺序
+  const order = S.prefModel ? PROVIDERS.filter(p => p.id === S.prefModel).concat(PROVIDERS.filter(p => p.id !== S.prefModel)) : PROVIDERS;
+  for (const p of order){
     if (!S.enabled[p.id] || !(S.keys[p.keyName] || '').trim()) continue;
     if ((cooldown[p.id] || 0) > Date.now()) continue;
     tried++;
@@ -1931,12 +1954,17 @@ function paintLine(l){
   markRecent();
   if (stick) box.scrollTop = box.scrollHeight;
 }
-// 正在说的那句（cur）放大、左边色条；刚说完的两句（recent）和它的中文全亮；更早的在跟随最新时调暗（CSS #subs.follow）
+// 正在说的那句（cur）放大、左边色条；刚说完的两句（recent）和它的中文全亮；
+// 再往上越来越淡（f1~f4，跟随最新时才淡，CSS #subs.follow）
 function markRecent(){
   const ls = L.lines, n = ls.length; if (!n) return;
-  const cur = ls[n - 1].status === 'live' || ls[n - 1].status === 'asr' ? ls[n - 1] : null;
-  const rec = new Set(ls.slice(Math.max(0, n - (cur ? 3 : 2)), cur ? n - 1 : n));
-  ls.slice(-6).forEach(l => { const e = document.getElementById('ln' + l.id); if (!e) return; e.classList.toggle('recent', rec.has(l)); e.classList.toggle('cur', l === cur); });
+  const cur = ls[n - 1].status === 'live' || ls[n - 1].status === 'asr';
+  for (let i = Math.max(0, n - 10); i < n; i++){
+    const e = document.getElementById('ln' + ls[i].id); if (!e) continue;
+    const d = n - 1 - i + (cur ? 0 : 1);   // 0 = 正在说，1、2 = 刚说完
+    e.classList.toggle('cur', d === 0); e.classList.toggle('recent', d === 1 || d === 2);
+    for (let f = 1; f <= 4; f++) e.classList.toggle('f' + f, d === f + 2);
+  }
 }
 // 打字效果：识别结果一次来好几个词，不一下子全显示，而是一个词一个词打出来。
 // 速度看还剩几个没打：剩得多就打得快，保证下一批到之前打完，不会越拖越慢。
@@ -2728,6 +2756,9 @@ function fillSettings(){
   $('#glossary').value = S.glossary;
   $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
   $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
+  $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor;
+  $('#prefModel').innerHTML = '<option value="">自动（按下面的顺序）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#prefModel').value = S.prefModel || '';
   $('#saveDefault').checked = S.saveDefault;
   $('#keepDays').value = S.keepDays;
   if (!$('#cmpText').value) $('#cmpText').value = 'Before you light the furnace, check the inlet and manifold pressure with a manometer, and make sure the inducer motor proves the pressure switch.';
@@ -2769,6 +2800,9 @@ $('#asrModel').onchange = () => { S.asrModel = $('#asrModel').value.trim() || 'w
 $('#sens').oninput = () => { S.sensitivity = +$('#sens').value; $('#sensV').textContent = S.sensitivity; saveSettings(); };
 $('#glossary').onchange = () => { S.glossary = $('#glossary').value; saveSettings(); };
 $('#fs').oninput = () => { S.fontSize = +$('#fs').value; $('#fsV').textContent = S.fontSize + 'px'; applyDisplay(); saveSettings(); };
+$('#curScale').oninput = () => { S.curScale = +$('#curScale').value; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; applyDisplay(); saveSettings(); };
+$('#curColor').onchange = () => { S.curColor = $('#curColor').value; applyDisplay(); saveSettings(); };
+$('#prefModel').onchange = () => { S.prefModel = $('#prefModel').value; saveSettings(); };
 $('#zhOp').oninput = () => { S.zhOpacity = +$('#zhOp').value; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%'; applyDisplay(); saveSettings(); };
 $('#saveDefault').onchange = () => { S.saveDefault = $('#saveDefault').checked; if (L.state === 'idle') $('#togSave').checked = S.saveDefault; saveSettings(); };
 
