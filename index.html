@@ -119,6 +119,9 @@ a{color:#7fb7ff}
 #btnPause{background:var(--warn);color:#111}
 .spacer{flex:1}
 #bottom .mic{font-size:14px;padding:10px 12px;border-radius:12px;color:var(--muted)}
+/* 选课程：外面看是个小按钮，点了出系统的选择列表（select 透明盖在上面） */
+#btnCourse{position:relative;display:inline-block;background:#232a33;white-space:nowrap;cursor:pointer}
+#btnCourse select{position:absolute;inset:0;width:100%;height:100%;opacity:0;font-size:16px;cursor:pointer}
 .tog{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:14px;user-select:none}
 .tog input{width:20px;height:20px}
 #bottom .big{white-space:nowrap}
@@ -207,6 +210,7 @@ a{color:#7fb7ff}
   <button id="btnEnd" class="big" style="display:none">结束</button>
   <button id="btnAsk" class="big" style="display:none">提示</button>
   <button id="btnMic" class="mic" aria-label="收音模式">全场</button>
+  <label id="btnCourse" class="mic" aria-label="哪门课"><span id="courseV">课程</span><select id="course"></select></label>
   <button id="btnEng" class="mic" aria-label="识别方式" style="display:none">Deepgram</button>
   <span class="spacer"></span>
   <label class="tog" id="togSaveL"><input type="checkbox" id="togSave">保存</label>
@@ -305,7 +309,7 @@ a{color:#7fb7ff}
       <div class="row"><label>首选模型</label><select id="prefModel"></select></div>
       <div class="hint">选了就先用它，被限流或出错时还是按下面的顺序换别的，不会翻不出来。</div>
       <div class="row"><label>"提示"用的模型</label><select id="askModel"></select></div>
-      <div class="hint">上课点"提示"时先用它。一次只花一两千字的额度，被限流就按顺序换别的。</div>
+      <div class="hint">上课点"提示"时先用它。默认 Gemini Flash（要填 Gemini 的 key），答 HVAC 比较准，会先想一下再答；没 key 或被限流就按顺序换 Groq 的。翻译不受影响，还是用上面的。</div>
       <div id="provList"></div>
       <div class="hint">模型名一般不用改。哪家改了模型名或下线了，在这里改成新名字。</div>
     </div>
@@ -423,7 +427,7 @@ const DEFAULTS = {
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
   showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3, keepDays:30,
-  curScale:1.15, curColor:'amber', prefModel:'', askModel:'', soundTags:false, tagKinds:{},
+  curScale:1.15, curColor:'amber', prefModel:'', askModel:'', course:'', soundTags:false, tagKinds:{},
 };
 let S;
 function loadSettings(){
@@ -1018,7 +1022,7 @@ async function start(){
     let mime = 'audio/mpeg';
     try { await new Promise((res, rej) => { loadLame().then(res, rej); setTimeout(() => rej(new Error('超时')), 6000); }); }
     catch(e){ mime = pickMime(); log('MP3 压缩库没加载上（' + e.message + '），录音改用系统录音方式'); }
-    L.session = {id:'s' + now.getTime(), title:defaultTitle(now), createdAt:now.getTime(), duration:0, mime, segs:[], lines:[], status:'recording'};
+    L.session = {id:'s' + now.getTime(), title:defaultTitle(now), createdAt:now.getTime(), duration:0, mime, segs:[], lines:[], status:'recording', course:S.course || ''};
     try { await DB.putSession(L.session); } catch(e){ toast('本地存储不可用，这次不保存：' + e.message); L.save = false; L.session = null; }
     L.mime = L.save ? mime : ''; L.segIdx = 0; L.rec = null;
     if (L.save && !mime) toast('这个浏览器不支持录音，只保存文字');
@@ -1026,7 +1030,7 @@ async function start(){
   L.wall0 = performance.now();   // 准备好了才开始计时（等压缩库、存数据库的时间不算进课堂时间）
   capWindowReset();
 
-  L.engine = engine;
+  L.engine = engine; L.course = S.course || '';
   Object.assign(L, {rmsH:[], nf:0, binSq:0, binT:0, whisperAt:0, whisperN:0, whisperManual:false,
     standby:false, standbyAt:0, wakeAt:0, pre:[], loudAt:-1e9, loudRun:0, lastLineAt:0, tags:[], tagSt:null, sbTag:null, lastSb:null, qa:[]});
   if (L.session){ L.session.tags = L.tags; L.session.qa = L.qa; }
@@ -2011,7 +2015,7 @@ const Cloud = {
     // 历史记录：一节课一个文件，谁新用谁的（录音在下面单独传）
     const local = (await DB.allSessions()) || [];
     const localIds = new Set(local.map(s => s.id));
-    const pack = s => Object.assign({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], tags:s.tags || [], qa:s.qa || [], updatedAt:s.updatedAt || 0},
+    const pack = s => Object.assign({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], tags:s.tags || [], qa:s.qa || [], course:s.course || '', updatedAt:s.updatedAt || 0},
       s.refined ? {refined:s.refined, liveLines:s.liveLines} : {});
     for (const s0 of local){
       const live = L.state !== 'idle' && L.session && L.session.id === s0.id;
@@ -2290,23 +2294,33 @@ $('#jump').onclick = toLatest;
 // 选错了点正确的那句（点紧挨着的句子是加上去），停手 0.8 秒后重新问，替换掉刚才那条问答
 // ☆ 收藏，课后历史记录里可以只看收藏；答完一分钟没碰卡片就缩成一行
 const ASK = {open:false, sel:[], ac:null, timer:null, seq:0, last:null, mini:null};
-const ASK_PROMPT = `You help a student in an HVAC / gas technician college class (Ontario, Canada; G3/G2 gas technician program) answer the instructor's question out loud, fast.
-The lecture text is live speech recognition and may contain errors; infer what the instructor meant from the context.
-Use the right reference for the topic:
-- Gas (piping, venting, appliances, pressures, clearances): CSA B149.1 / B149.2, TSSA, Ontario rules.
-- Refrigeration / A/C / heat pumps: standard HVAC/R practice (manufacturer charging charts, superheat / subcooling, metering devices, etc.). B149 does NOT cover refrigeration.
-- Electrical / controls: standard trade practice.
-Use units as normally used in Ontario trades. Do not use US codes (NFPA 54 etc.) unless asked.
-Accuracy matters more than anything: check the answer carefully before writing (watch for answers that are easy to swap, e.g. which method goes with which device). If the instructor already explained the answer earlier in the lecture, use the instructor's version.
-Answer in exactly this format, three lines:
-SHORT: <the answer the way a student would call it out in class: usually 1-6 words, e.g. "7 inches water column", "The thermocouple", "Close the manual shutoff". Only use a short sentence (max 12 words) when a few words can't answer it>
+const ASK_PROMPT = `You help a student (Chinese speaker, in Ontario, Canada) respond out loud, fast. The student is in an HVAC / gas technician college program (G3/G2), but the text below may also be casual talk (classmates chatting, schedules, a part-time job interview, everyday errands).
+The text is live speech recognition and may contain errors; infer what was meant from the context.
+FIRST decide from the recent text which situation this is (the "Situation hint" is only a hint; classes often have small talk too):
+A) Technical / class content (HVAC, gas, refrigeration, electrical, controls, tools, codes) -> answer like a sharp student:
+SHORT: <the answer the way a student would call it out in class: usually 1-6 words, e.g. "7 inches water column", "The thermocouple". Max 12 words only when a few words can't answer it>
 中文：<one short sentence in Simplified Chinese saying what the answer means>
-DETAIL: <2-5 short sentences in Simplified Chinese (keep English technical terms in brackets): why, how it works, key numbers/units, code clause if relevant>
-Rules:
-- Never write a code clause / section number unless you are certain it is real and correct; do not invent clause numbers.
-- If you are not sure about a specific number or fact, put "not sure" in SHORT and do not make up numbers.
-- If the selected text is not really a question, SHORT = the key point in a few words, and explain in 中文 / DETAIL.
-- No other text, no markdown.`;
+DETAIL: <2-5 short sentences in Simplified Chinese (keep English technical terms in brackets): why, how it works, key numbers/units>
+ References: gas (piping, venting, appliances, pressures, clearances) = CSA B149.1 / B149.2, TSSA, Ontario rules. Refrigeration / A/C / heat pumps = standard HVAC/R practice (charging charts, superheat / subcooling, metering devices); B149 does NOT cover refrigeration. Electrical / controls = standard trade practice. Ontario trade units; no US codes (NFPA 54 etc.) unless asked.
+ Accuracy matters most: check carefully (watch for easy-to-swap answers, e.g. which method goes with which device). If the instructor explained it earlier, use the instructor's version. Never write a code clause / section number unless certain it is real; never invent clause numbers. If unsure of a number or fact, put "not sure" in SHORT.
+B) Everyday conversation (small talk, plans, work, errands) -> help the student reply naturally:
+SHORT: <one natural, friendly Canadian English reply the student can say right now, max 15 words>
+中文：<what the other person means and their tone, one short sentence in Simplified Chinese>
+DETAIL: <in Simplified Chinese: 2-3 other ways to reply (casual / polite, in English), and explain any slang or idioms they used>
+C) The selected text is not a question (a statement, joke, instruction) -> SHORT = a fitting short reply or the key point; 中文 = what they are saying; DETAIL = more explanation if useful.
+Always exactly three lines starting with SHORT: / 中文： / DETAIL:. No other text, no markdown.`;
+// 开始前选的课程（只是参考，模型每次自己按前 30 句判断场合）
+const COURSES = [
+  {id:'', name:'自动', hint:''},
+  {id:'1012', name:'1012', hint:'SOSC-1012, a general education social science course (psychology, research methods); not HVAC'},
+  {id:'1083', name:'1083', hint:'MECH-1083, domestic gas appliances'},
+  {id:'1084', name:'1084', hint:'MECH-1084, water heaters, combination systems, boilers'},
+  {id:'1085', name:'1085', hint:'MECH-1085, HVAC / gas technician course'},
+  {id:'3004', name:'3004', hint:'MECH-3004, HVAC / gas technician course'},
+  {id:'3009', name:'3009', hint:'MECH-3009, sheet metal and duct fabrication'},
+  {id:'chat', name:'日常聊天', hint:'everyday conversation (not a class)'},
+];
+const courseOf = id => COURSES.find(c => c.id === id) || COURSES[0];
 const Q_RE = /\?|^\W*(what|why|how|which|who|when|where|can|could|does|do|did|is|are|was|were|should|would|will|anyone|anybody|somebody|tell me|name|give me|explain)\b/i;
 const lineText = l => sureText((l.en || '') + (l.status === 'live' && l.im ? ' ' + l.im : ''));
 // 手指刚碰过字幕（3 秒内），答案卡片开着时字幕先别自动往上滚，免得点的那句被推走
@@ -2360,17 +2374,18 @@ document.addEventListener('click', e => {
   const on = box.classList.toggle('det');
   box.querySelectorAll('.adetb').forEach(x => x.textContent = on ? '收起详细 ▴' : '详细 ▾');
 }, true);
-// 流式调用（边生成边显示），先用设置里"问 AI 用的模型"，没选就先 gpt-oss-120b；出错按顺序换下一个
+// 流式调用（边生成边显示），先用设置里"提示用的模型"，没选就先 Gemini Flash（答 HVAC 比 gpt-oss 准）；出错按顺序换下一个
 async function streamProvider(p, sys, user, onText, signal){
   const model = modelOf(p), key = (S.keys[p.keyName] || '').trim();
   let url, mk, pick, hasExtra;
   if (p.kind === 'gemini'){
     url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
     hasExtra = !p.noSys;
-    mk = plain => JSON.stringify(p.noSys ? {contents:[{role:'user', parts:[{text:sys + '\n\n' + user}]}], generationConfig:{temperature:0.3, maxOutputTokens:800}}
+    // 提示要准：Gemini 打开思考（中档 1024，翻译那边是 0）；思考也算在 maxOutputTokens 里，所以给大一点
+    mk = plain => JSON.stringify(p.noSys ? {contents:[{role:'user', parts:[{text:sys + '\n\n' + user}]}], generationConfig:{temperature:0.3, maxOutputTokens:1200}}
       : {systemInstruction:{parts:[{text:sys}]}, contents:[{role:'user', parts:[{text:user}]}],
-         generationConfig:Object.assign({temperature:0.3, maxOutputTokens:800}, plain ? {} : {thinkingConfig:{thinkingBudget:0}})});
-    pick = j => ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).map(x => x.text || '').join('');
+         generationConfig:Object.assign({temperature:0.3, maxOutputTokens:3000}, plain ? {} : {thinkingConfig:{thinkingBudget:1024}})});
+    pick = j => ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).filter(x => !x.thought).map(x => x.text || '').join('');
   } else {
     url = p.base + '/chat/completions';
     hasExtra = !!p.extra;
@@ -2408,7 +2423,7 @@ async function streamProvider(p, sys, user, onText, signal){
   return text;
 }
 async function askStream(sys, user, onText, signal){
-  const first = S.askModel || 'groq-gptoss';
+  const first = S.askModel || 'gemini-flash';
   const order = PROVIDERS.filter(p => p.id === first).concat(PROVIDERS.filter(p => p.id !== first));
   let lastErr = null;
   for (const p of order){
@@ -2462,9 +2477,11 @@ async function askNow(replace){
   const ctx = L.lines.slice(Math.max(0, i0 - 30), Math.max(0, i0)).map(lineText).filter(Boolean);   // 前 30 句：老师常常刚讲过答案
   const gl = glossaryFor(q + ' ' + ctx.join(' '));
   let u = '';
+  const cs = courseOf(L.course);
+  if (cs.hint) u += 'Situation hint (picked by the student before starting; may be wrong): ' + cs.hint + '\n\n';
   if (gl.length) u += 'Glossary (English = Chinese):\n' + gl.map(g => `- ${g.en} = ${g.zh}`).join('\n') + '\n\n';
   if (ctx.length) u += 'Lecture just before (most recent last):\n' + ctx.join('\n') + '\n\n';
-  u += 'The instructor just said / asked:\n' + q;
+  u += 'Just said / asked (the selected text):\n' + q;
   ans.innerHTML = '<div class="azh">想一下…</div>';
   const t0 = Date.now();
   try {
@@ -2527,6 +2544,7 @@ function updateButtons(){
   $('#btnPause').textContent = st === 'paused' ? '继续' : '暂停';
   $('#togSave').disabled = st !== 'idle';
   $('#btnMic').style.display = st === 'idle' ? '' : 'none';   // 收音模式点"开始"时才生效，上课中不显示
+  $('#btnCourse').style.display = st === 'idle' ? '' : 'none';
   $('#btnAsk').style.display = st === 'idle' ? 'none' : '';
   $('#bottom').classList.toggle('run', st !== 'idle');
   showEngine(); showVad();
@@ -3298,7 +3316,7 @@ function fillSettings(){
   $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor; $('#soundTags').checked = !!S.soundTags; fillTagKinds();
   $('#prefModel').innerHTML = '<option value="">自动（按下面的顺序）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#prefModel').value = S.prefModel || '';
-  $('#askModel').innerHTML = '<option value="">自动（gpt-oss-120b，限流再换）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#askModel').innerHTML = '<option value="">自动（Gemini Flash，不行再换 Groq）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#askModel').value = S.askModel || '';
   $('#saveDefault').checked = S.saveDefault;
   $('#keepDays').value = S.keepDays;
@@ -3326,6 +3344,9 @@ const setMicMode = m => { S.micMode = m; saveSettings(); showMicMode(); if (L.st
 function showMicMode(){ $('#btnMic').textContent = S.micMode === 'near' ? '近处' : '全场'; $('#micMode').value = S.micMode; }
 $('#micMode').onchange = () => setMicMode($('#micMode').value);
 // 主界面的小开关：全场（手机在自己座位上）↔ 近处（手机在老师旁边，通话模式）
+function showCourse(){ const c = courseOf(S.course); $('#courseV').textContent = c.id ? c.name : '课程'; $('#course').value = c.id; }
+$('#course').innerHTML = COURSES.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+$('#course').onchange = () => { S.course = $('#course').value; saveSettings(); showCourse(); toast('点"提示"时告诉 AI 这是' + courseOf(S.course).name + '（只是参考）', 2500); };
 $('#btnMic').onclick = () => { setMicMode(S.micMode === 'near' ? 'room' : 'near'); toast(S.micMode === 'near' ? '近处（通话模式）：手机放在老师旁边时用' : '全场：手机放在自己座位上时用', 3000); };
 $('#diarize').onchange = () => { S.diarize = $('#diarize').checked; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
 $('#multiLang').onchange = () => { S.multiLang = $('#multiLang').checked; saveSettings(); if (L.state !== 'idle') toast('下次开始时生效'); };
@@ -3401,7 +3422,7 @@ window.addEventListener('beforeunload', e => { if (L.state !== 'idle'){ e.preven
 })();
 
 /* init */
-loadSettings(); lastSyncPart = syncPart(); applyDisplay();
+loadSettings(); lastSyncPart = syncPart(); applyDisplay(); showCourse();
 $('#togSave').checked = S.saveDefault;
 showMicMode();
 updateButtons();

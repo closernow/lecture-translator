@@ -68,7 +68,7 @@
 | `whisperRange` `whisperFile` `whisperFake` `refineWhisper` `wordsToLines` | 精修里的 Whisper：10 分钟一块、逐词时间、去掉瞎编句 |
 | `openSession` `renderSessLines` `sessionText` | 历史记录详情页、导出文字格式 |
 | `setMicMode` `showMicMode` `#btnMic` | 收音模式（主界面"全场/近处"按钮） |
-| `/* === 问 AI` `ASK` `ASK_PROMPT` `pickQuestion` `askNow` `askStream` `streamProvider` `parseAns` `answerHtml` `askMini` `starShow` `#askBox` `#sessFilter` | 上课点"提示"抢答：自动选最近的问题、流式回答、三层答案、收藏、缩成一行；问答存 `session.qa` |
+| `/* === 问 AI` `ASK` `ASK_PROMPT` `COURSES` `courseOf` `showCourse` `#btnCourse` `pickQuestion` `askNow` `askStream` `streamProvider` `parseAns` `answerHtml` `askMini` `starShow` `#askBox` `#sessFilter` | 上课点"提示"抢答：自动选最近的问题、流式回答、三层答案、收藏、缩成一行；问答存 `session.qa` |
 
 ## 踩过的坑和定下的做法（别改回去）
 
@@ -110,7 +110,9 @@
 - 按钮叫"提示"（用户不想屏幕上出现"AI"二字，同学瞄到不显眼），代码里还叫 ASK
 - 只做手动：上课中底栏"提示"按钮，一按就自动选最近 6 句里最后一个像问题的（问号或 what/why/how/is/can… 开头），前一行没句号结尾、同一说话人就连上（最多往前 2 行）；找不到就选最近 2 句。选中的是灰字就等定稿，最多 1.5 秒
 - 答案卡片开着时点字幕：紧挨着选中部分的句子是加上，两头的是去掉，别的是换成那句；停手 0.8 秒重新问，**替换**刚才那条问答（按按钮问的才是新的一条）。手指碰字幕 3 秒内不自动往上滚（`askHold`）
-- 回答：流式（OpenAI 兼容 `stream:true`、Gemini `streamGenerateContent?alt=sse`），三层格式 `SHORT:` 几个词的短答案（像同学喊出来的，大字黄色）+ `中文：` 一句 + `DETAIL:` 详细（中文，默认收起，点"详细 ▾"展开，同一次请求要回来，点开不用等）；`parseAns` 兼容老格式 `EN:`；提示词按题目分：燃气按 B149 / TSSA，制冷按 HVAC/R 行业做法（B149 不管制冷——实测 11/4 硬套 B149 把 TXV 过冷/固定节流孔过热说反，还编了 B149.1-12.2.2.1 条款），不许编条款号，老师讲过的以老师为准，不确定说 not sure。带前 30 句和术语表。gpt-oss 思考调中档（翻译仍低档，提示每次慢 1–2 秒），max_tokens 4000。以后治本：把各课老师要点/教材摘要放设置里（只存本机和 Drive 隐藏数据），按关键词挑段落一起发。默认先用 gpt-oss-120b（一次只花一两千 token），设置"问 AI 用的模型" `S.askModel`（云同步），失败照 `PROVIDERS` 顺序换，和翻译共用冷却 `coolDown`
+- 回答：流式（OpenAI 兼容 `stream:true`、Gemini `streamGenerateContent?alt=sse`），三层格式 `SHORT:` 几个词的短答案（像同学喊出来的，大字黄色）+ `中文：` 一句 + `DETAIL:` 详细（中文，默认收起，点"详细 ▾"展开，同一次请求要回来，点开不用等）；`parseAns` 兼容老格式 `EN:`；提示词按题目分：燃气按 B149 / TSSA，制冷按 HVAC/R 行业做法（B149 不管制冷——实测 11/4 硬套 B149 把 TXV 过冷/固定节流孔过热说反，还编了 B149.1-12.2.2.1 条款），不许编条款号，老师讲过的以老师为准，不确定说 not sure。带前 30 句和术语表。gpt-oss 思考调中档（翻译仍低档，提示每次慢 1–2 秒），max_tokens 4000。以后治本：把各课老师要点/教材摘要放设置里（只存本机和 Drive 隐藏数据），按关键词挑段落一起发。**11/4 改成默认先用 Gemini Flash**（`gemini-flash-latest`，用户觉得 Gemini 答 HVAC 更准；还没用真 key 验证），提示时 Gemini 开思考 `thinkingBudget:1024`、`maxOutputTokens:3000`（思考也算在里面；流里 `thought:true` 的部分不显示），翻译仍是 0；设置"提示用的模型" `S.askModel`（云同步），没 Gemini key 或失败照 `PROVIDERS` 顺序换 Groq，和翻译共用冷却 `coolDown`
+- **先判断场合**（`ASK_PROMPT`）：A 上课技术内容 → 原来的三层；B 日常聊天（同学闲聊、课程安排、打工面试、办事）→ SHORT 是一句能直接说出口的加拿大日常英文回应，中文说对方什么意思什么语气，DETAIL 给另外两三种说法（随意/礼貌）和俚语解释；C 选中的不是问题 → 给一句合适回应 + 解释。模型每次按前 30 句自己判断
+- **选课程**（`#btnCourse`，"开始"旁边，像"全场/近处"，上课中隐藏）：课程（自动，默认）/ 1012 1083 1084 1085 3004 3009 / 日常聊天；透明 `select` 盖在按钮上（iPad 出系统选择列表）。存 `S.course`（每台设备各自，不云同步），开始时记进 `L.course` 和 `session.course`；提示时作为 `Situation hint` 发给模型，只是参考。`COURSES` 里 1012 是通识课（社会科学）、1083 家用燃气电器、1084 热水器/组合系统/锅炉、3009 钣金风管，1085、3004 没写具体内容
 - ☆ 收藏（`rec.star`）：卡片右上角，改选替换时星号带过来；答完 60 秒没碰卡片就缩成一行只剩短答案（`askMini`），点卡片展开
 - 历史记录详情页 `#sessFilter`：全部字幕 / 只看提示 / 只看收藏；卡片上可点 ☆；点卡片从问题前 8 秒播
 - 问答存 `session.qa`（`{t, q, a, m, star}`，t 是问题最后一句 +0.01 秒，排在问题后面），跟着云同步；历史记录按时间插成 `.qa` 卡片（不是 `.line`），导出写成 `【提示 ⭐】问题 / 答：短答案 / 中文 / 详细：…`
