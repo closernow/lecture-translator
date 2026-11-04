@@ -952,7 +952,7 @@ function capTick(){
   if (L.zeroRun >= 5 && now - (L.fixAt || 0) > 20000){ L.fixAt = now; micFix(); }
   // 明显有人在说话，Deepgram 却 15 秒一个词都没回：连接多半卡住了，重连（没定稿的声音会重发）。
   // 实测 11/2：连接正常、一直回空结果将近 1 分钟，重连后马上又认得出，所以等 15 秒就重连（以前 30 秒）
-  if (L.engine === 'dg' && DG.ws && DG.ws.readyState === 1 && L.loudNoWord >= 8 && realNow() - DG.lastWordAt > 15 && now - (DG.kickAt || 0) > 30000){
+  if (L.engine === 'dg' && !L.standby && DG.ws && DG.ws.readyState === 1 && L.loudNoWord >= 8 && realNow() - DG.lastWordAt > 15 && now - (DG.kickAt || 0) > 30000){
     // 4 分钟里第二次了：多半是场地回声太大 Deepgram 认不出（实测 Whisper 在这种地方认得出），这节课改用 Whisper 按句识别
     DG.kicks = (DG.kicks || []).filter(x => now - x < 240000).concat(now);
     if (DG.kicks.length >= 2 && S.keys.groq.trim()){
@@ -1028,7 +1028,7 @@ async function start(){
 
   L.engine = engine;
   Object.assign(L, {rmsH:[], nf:0, binSq:0, binT:0, whisperAt:0, whisperN:0, whisperManual:false,
-    standby:false, standbyAt:0, wakeAt:0, pre:[], loudAt:-1e9, loudRun:0, lastLineAt:0, tags:[], tagSt:null, sbTag:null, qa:[]});
+    standby:false, standbyAt:0, wakeAt:0, pre:[], loudAt:-1e9, loudRun:0, lastLineAt:0, tags:[], tagSt:null, sbTag:null, lastSb:null, qa:[]});
   if (L.session){ L.session.tags = L.tags; L.session.qa = L.qa; }
   askOpen(false);
   VAD.reset(); VAD.load();
@@ -1189,7 +1189,8 @@ const DG = {
   ws:null, opened:false, queue:[], sent:[], offset:null, inPos:0, cur:null, fails:0, retryAt:0, closing:false,
   confirmed:0, lastMsgAt:0, lastSendAt:0, openAt:0, dog:null,
   begin(){
-    Object.assign(this, {ws:null, queue:[], sent:[], map:[], audioPos:0, cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0, lastWordAt:0, kicks:[], lastBuf:0});
+    Object.assign(this, {ws:null, queue:[], sent:[], map:[], audioPos:0, cur:null, fails:0, retryAt:0, closing:false, inPos:0, confirmed:0, lastWordAt:0, kicks:[], lastBuf:0, mute:false});
+    clearTimeout(this.sleepT);
     clearInterval(this.dog); this.dog = setInterval(() => this.watch(), 2000);
     this.open();
   },
@@ -1239,7 +1240,7 @@ const DG = {
   watch(){
     if (L.state === 'idle' || L.engine !== 'dg'){ clearInterval(this.dog); return; }
     const ws = this.ws, now = Date.now();
-    if (L.state === 'paused'){ try { if (ws && ws.readyState === 1) ws.send('{"type":"KeepAlive"}'); } catch(e){} return; }
+    if (L.state === 'paused' || L.standby){ try { if (ws && ws.readyState === 1) ws.send('{"type":"KeepAlive"}'); } catch(e){} return; }
     if (!ws) return;
     if (ws.readyState === 0 && now - this.openAt > 8000){ log('Deepgram 连接超时'); this.lost(); return; }
     if (ws.readyState !== 1) return;
@@ -1267,12 +1268,22 @@ const DG = {
     L.whisperAt = Date.now(); L.whisperManual = !!manual; if (!manual) L.whisperN = (L.whisperN || 0) + 1;
     updateProv(); showEngine();
   },
-  // 待机：把这句收尾、关掉连接（不走断线重发），不再发声音
+  // 待机：不发声音，但连接不断（看门狗每 2 秒发 KeepAlive，Deepgram 只按声音收费）。
+  // 以前待机就断开，醒来新连一条，Deepgram 从零开始听，第一句常被分给两个说话人、切成两截（实测 11/4）
+  // 先让 Deepgram 把听到的定稿，1.5 秒后收尾这一句；之后再来的结果不要（mute），免得收尾过的词又出现一次
   sleep(){
-    this.endLine('flush');
-    const ws = this.ws; this.ws = null;
-    if (ws){ ws.onclose = ws.onmessage = null; try { ws.send(JSON.stringify({type:'CloseStream'})); } catch(e){} try { ws.close(); } catch(e){} }
-    clearInterval(this.dog); this.queue = []; this.sent = [];
+    try { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({type:'Finalize'})); } catch(e){}
+    this.queue = [];
+    clearTimeout(this.sleepT);
+    this.sleepT = setTimeout(() => { if (!L.standby) return; this.endLine('flush'); this.mute = true; this.sent = []; }, 1500);
+  },
+  // 醒来：连接还在就接着用，补发待机时最后 3 秒；连接断了才重新连
+  wakeUp(pre){
+    clearTimeout(this.sleepT); this.mute = false;
+    if (!this.ws) this.begin();   // 待机时断了（或刚从 Whisper 改回来）才重新连
+    else { this.sent = []; this.lastMsgAt = Date.now(); }
+    this.lastWordAt = realNow(); this.kickAt = performance.now();
+    for (const p of pre) this.push(p.f, p.t);
   },
   // 4 分钟里第二次"有人说话却不出字"：先把最近 15 秒给 Whisper 试认，认出正常的英文句子才切过去；
   // 认不出（多半是音乐、噪音，或者其实没人说话）就不切，没人说话就待机，否则重连再看
@@ -1325,6 +1336,7 @@ const DG = {
     if (this.map.length > 3000) this.map.splice(0, this.map.length - 2000);   // 换算表留最近 3 分钟左右
   },
   onMsg(data){
+    if (this.mute) return;   // 待机中（这句已经收尾了）
     let m; try { m = JSON.parse(data); } catch(e){ return; }
     // 停顿了（1 秒），而且后面没有新词：句子说完了（句号问号叹号结尾）就断；
     // 没说完就再等 1.5 秒，还是没新词才断（以前一停就断，老师句子中间想个词就被切成两半）
@@ -1390,6 +1402,16 @@ const DG = {
         let run = 0; for (let j = i; j < all.length && run < 3; j++){ if (all[j].doubt) continue; if (all[j].spk === spk) run++; else break; }
         if (run < 3) spk = c.line.spk;
       }
+      // 句子还没说完（不是句号问号结尾）、中间也没停顿（<0.8 秒）就换了人：多半是 Deepgram 分错人，不拆开。
+      // 实测 11/4：刚醒来的"What charging method | do you use for a system with a TXV?"被分给说话人 1、2，切成两行。
+      // 醒来 10 秒内更容易分错，停顿要超过 1 秒才算换人
+      if (spk !== undefined && c.line.spk !== undefined && spk !== c.line.spk && c.line.en){
+        const gap = w.s - (c.lastE ?? w.s), early = realNow() - (L.wakeAt || -1e9) < 10;
+        if (early ? gap < 1 : (!SENT_END.test(c.line.en.replace(/⟧$/, '')) && gap < 0.8)){
+          if (!c.spkKeep){ c.spkKeep = true; log(`说话人从 ${c.line.spk + 1} 变成 ${spk + 1}，但句子没说完、没停顿${early ? '（刚醒来）' : ''}，不另起一行`); }
+          spk = c.line.spk;
+        }
+      }
       if (spk !== undefined && c.line.spk !== undefined && spk !== c.line.spk && c.line.en){
         const keep = c.seen || c.im; c.im = c.seen = []; this.endLine(); this.newLine(w.s, spk); this.cur.im = this.cur.seen = keep;
       } else if (spk !== undefined && c.line.spk === undefined) c.line.spk = spk;
@@ -1397,7 +1419,7 @@ const DG = {
       const piece = w.doubt ? '⟦' + w.w + '⟧' : w.w;
       line.en = line.en ? (w.doubt && /⟧$/.test(line.en) ? line.en.slice(0, -1) + ' ' + w.w + '⟧' : line.en + ' ' + piece) : piece;
       addWordTimes(line, w);
-      if (!w.doubt) addLang(line, w.lang);
+      if (!w.doubt){ addLang(line, w.lang); this.cur.lastE = w.e; }
     });
     if (doubtful.length) log(`识别删掉了 ${doubtful.length} 个词，留成存疑：${doubtful.map(w => w.w).join(' ')}`);
     const c = this.cur; if (!c) return;
@@ -1627,21 +1649,25 @@ function enterStandby(){
   if (L.standby || L.state !== 'running') return;
   log('一分钟没人说话，识别先待机（录音照录，有人说话自动恢复）');
   L.standby = true; L.standbyAt = realNow(); L.pre = [];
-  L.sbTag = addTag(L.standbyAt - 60, '💤 没人说话，识别待机中');
+  // 上次醒来后一句话都没出（只是短暂的声音）：接着用上次那条待机标记，不再加一条
+  const ps = L.lastSb;
+  if (ps && TAG_EL.get(ps.g) && !L.lines.some(l => l.t >= ps.end - 4 && (l.en || '').trim())){
+    L.sbTag = ps.g; ps.g.tag = '💤 没人说话，识别待机中'; TAG_EL.get(ps.g).textContent = ps.g.tag;
+  } else L.sbTag = addTag(L.standbyAt - 60, '💤 没人说话，识别待机中');
   if (L.engine === 'dg') DG.sleep(); else L.seg = null;
   updateProv(); showVad();
 }
 function wake(why){
   if (!L.standby) return;
   L.standby = false; L.wakeAt = realNow();
-  if (L.sbTag){ L.sbTag.tag = `💤 ${fmtT(L.sbTag.t)}–${fmtT(L.wakeAt)} 没人说话`; const e = TAG_EL.get(L.sbTag); if (e) e.textContent = L.sbTag.tag; L.sbTag = null; if (L.session) dirty(L.session, L.lines); }
+  if (L.sbTag){ L.sbTag.tag = `💤 ${fmtT(L.sbTag.t)}–${fmtT(L.wakeAt)} 没人说话`; const e = TAG_EL.get(L.sbTag); if (e) e.textContent = L.sbTag.tag; L.lastSb = {g:L.sbTag, end:L.wakeAt}; L.sbTag = null; if (L.session) dirty(L.session, L.lines); }
   // 自动切到 Whisper 的，醒来先用 Deepgram（手动选的 Whisper 不动）
   const toDg = L.engine === 'whisper' && !L.whisperManual && S.keys.dg.trim();
   log(`${why}，恢复识别${toDg ? '（改回 Deepgram）' : ''}`);
   if (toDg) L.engine = 'dg';
   if (L.engine === 'dg'){
-    DG.begin(); DG.lastWordAt = realNow(); DG.kickAt = performance.now(); L.loudNoWord = 0;
-    for (const p of L.pre) DG.push(p.f, p.t);   // 待机时最后 3 秒补发
+    L.loudNoWord = 0;
+    DG.wakeUp(L.pre);   // 连接还在就接着用；待机时最后 3 秒补发
   } else { L.seg = null; L.hist = []; }
   L.pre = [];
   updateProv(); showVad(); showEngine();
@@ -2266,13 +2292,19 @@ $('#jump').onclick = toLatest;
 const ASK = {open:false, sel:[], ac:null, timer:null, seq:0, last:null, mini:null};
 const ASK_PROMPT = `You help a student in an HVAC / gas technician college class (Ontario, Canada; G3/G2 gas technician program) answer the instructor's question out loud, fast.
 The lecture text is live speech recognition and may contain errors; infer what the instructor meant from the context.
-Use Canadian / Ontario rules and practice: CSA B149.1 / B149.2, TSSA, Ontario codes, units as normally used in Ontario trades. Do not use US codes (NFPA 54 etc.) unless asked.
+Use the right reference for the topic:
+- Gas (piping, venting, appliances, pressures, clearances): CSA B149.1 / B149.2, TSSA, Ontario rules.
+- Refrigeration / A/C / heat pumps: standard HVAC/R practice (manufacturer charging charts, superheat / subcooling, metering devices, etc.). B149 does NOT cover refrigeration.
+- Electrical / controls: standard trade practice.
+Use units as normally used in Ontario trades. Do not use US codes (NFPA 54 etc.) unless asked.
+Accuracy matters more than anything: check the answer carefully before writing (watch for answers that are easy to swap, e.g. which method goes with which device). If the instructor already explained the answer earlier in the lecture, use the instructor's version.
 Answer in exactly this format, three lines:
 SHORT: <the answer the way a student would call it out in class: usually 1-6 words, e.g. "7 inches water column", "The thermocouple", "Close the manual shutoff". Only use a short sentence (max 12 words) when a few words can't answer it>
 中文：<one short sentence in Simplified Chinese saying what the answer means>
 DETAIL: <2-5 short sentences in Simplified Chinese (keep English technical terms in brackets): why, how it works, key numbers/units, code clause if relevant>
 Rules:
-- If you are not sure about a specific number or code clause, put "not sure" in SHORT and do not make up numbers.
+- Never write a code clause / section number unless you are certain it is real and correct; do not invent clause numbers.
+- If you are not sure about a specific number or fact, put "not sure" in SHORT and do not make up numbers.
 - If the selected text is not really a question, SHORT = the key point in a few words, and explain in 中文 / DETAIL.
 - No other text, no markdown.`;
 const Q_RE = /\?|^\W*(what|why|how|which|who|when|where|can|could|does|do|did|is|are|was|were|should|would|will|anyone|anybody|somebody|tell me|name|give me|explain)\b/i;
@@ -2342,7 +2374,9 @@ async function streamProvider(p, sys, user, onText, signal){
   } else {
     url = p.base + '/chat/completions';
     hasExtra = !!p.extra;
-    mk = plain => JSON.stringify(Object.assign({model, messages:[{role:'system', content:sys}, {role:'user', content:user + (p.suffix || '')}], temperature:0.3, max_tokens:1500, stream:true}, plain ? {} : p.extra || {}));
+    // 提示要准：gpt-oss 的思考调到中档（翻译用低档），每次大概慢 1–2 秒，但"哪个配哪个"这类题不容易说反
+    const more = p.extra && p.extra.reasoning_effort === 'low' ? {reasoning_effort:'medium'} : {};
+    mk = plain => JSON.stringify(Object.assign({model, messages:[{role:'system', content:sys}, {role:'user', content:user + (p.suffix || '')}], temperature:0.3, max_tokens:4000, stream:true}, plain ? {} : Object.assign({}, p.extra || {}, more)));
     pick = j => (j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content) || '';
   }
   const ac = new AbortController(), kill = () => ac.abort();
@@ -2425,13 +2459,13 @@ async function askNow(replace){
   const q = sel.map(lineText).join(' ');
   if (!q){ ans.innerHTML = '<div class="azh">这句还没有字，点别的句子试试</div>'; return; }
   const i0 = L.lines.indexOf(sel[0]);
-  const ctx = L.lines.slice(Math.max(0, i0 - 12), Math.max(0, i0)).map(lineText).filter(Boolean);
+  const ctx = L.lines.slice(Math.max(0, i0 - 30), Math.max(0, i0)).map(lineText).filter(Boolean);   // 前 30 句：老师常常刚讲过答案
   const gl = glossaryFor(q + ' ' + ctx.join(' '));
   let u = '';
   if (gl.length) u += 'Glossary (English = Chinese):\n' + gl.map(g => `- ${g.en} = ${g.zh}`).join('\n') + '\n\n';
   if (ctx.length) u += 'Lecture just before (most recent last):\n' + ctx.join('\n') + '\n\n';
   u += 'The instructor just said / asked:\n' + q;
-  ans.innerHTML = '<div class="azh">正在问…</div>';
+  ans.innerHTML = '<div class="azh">想一下…</div>';
   const t0 = Date.now();
   try {
     const {p, text} = await askStream(ASK_PROMPT, u, s => { if (my === ASK.seq){ ansShow(s); askFit(); } }, ac.signal);
