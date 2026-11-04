@@ -69,6 +69,9 @@ a{color:#7fb7ff}
 #subs.follow .line.f3{opacity:.4}
 #subs.follow .line.f4{opacity:.3}
 #subs.follow{-webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 70px);mask-image:linear-gradient(to bottom, transparent 0, #000 70px)}
+.tagkinds{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px 12px;margin:4px 0 8px;font-size:14px}
+.tagkinds label{display:flex;align-items:center;gap:6px}
+.tagkinds input{width:18px;height:18px}
 .stag{color:var(--muted);font-size:13px;text-align:center;margin:-6px 0 14px}
 #subs.follow .stag{opacity:.6}
 #jump{position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom) + 96px);display:none;background:#2d6b4a}
@@ -270,7 +273,8 @@ a{color:#7fb7ff}
       <div class="row"><label>字号</label><input type="range" id="fs" min="16" max="36" step="1"><span id="fsV" class="hint"></span></div>
       <div class="row"><label>中文亮度</label><input type="range" id="zhOp" min="0.2" max="1" step="0.05"><span id="zhOpV" class="hint"></span></div>
       <div class="row"><label>正在说的句子</label><input type="range" id="curScale" min="1" max="1.5" step="0.05"><span id="curScaleV" class="hint"></span></div>
-      <div class="row"><label>声音标记</label><input type="checkbox" id="soundTags" style="width:20px;height:20px"><span class="hint">字幕里标出笑声、掌声、音乐开始和停止（没人说话的待机时段总会标）</span></div>
+      <div class="row"><label>声音标记</label><input type="checkbox" id="soundTags" style="width:20px;height:20px"><span class="hint">字幕里标出下面勾选的声音（没人说话的待机时段总会标）</span></div>
+      <div id="tagKinds" class="tagkinds"></div>
       <div class="row"><label>突出颜色</label><select id="curColor"><option value="amber">琥珀色</option><option value="green">绿色</option><option value="blue">蓝色</option><option value="none">不加色条</option></select></div>
       <div class="row"><label>默认保存</label><input type="checkbox" id="saveDefault" style="width:20px;height:20px"><span class="hint">开始时"保存"开关的默认状态</span></div>
     </div>
@@ -371,7 +375,7 @@ const DEFAULTS = {
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
   showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3, keepDays:30,
-  curScale:1.15, curColor:'amber', prefModel:'', soundTags:false,
+  curScale:1.15, curColor:'amber', prefModel:'', soundTags:false, tagKinds:{},
 };
 let S;
 function loadSettings(){
@@ -1460,7 +1464,25 @@ function agcApply(f, g){
 // 加载不了（断网、老设备）就退回音量判断：比背景声明显响就当有人说话
 const VAD_V = '0.10.35';
 const VAD_SPEECH = /^(Speech|Male speech|Female speech|Child speech|Conversation|Narration|Babbling|Whispering|Shout|Yell)/;
-const VAD_LAUGH = /^(Laughter|Baby laughter|Giggle|Snicker|Belly laugh|Chuckle)/, VAD_CLAP = /^(Applause|Clapping|Cheering)/;
+// 字幕里可以标出的声音（设置里逐项勾选）。event：同类 15 秒内只标一次；span：一直响的，只标开始和停止
+const TAG_KINDS = [
+  {id:'laugh', name:'😄 笑声', re:/^(Laughter|Baby laughter|Giggle|Snicker|Belly laugh|Chuckle)/, on:true},
+  {id:'clap', name:'👏 掌声', re:/^(Applause|Clapping|Cheering)/, on:true},
+  {id:'music', name:'🎵 音乐', stop:'🎵 音乐停了', span:true, on:true},
+  {id:'cough', name:'🤧 咳嗽、喷嚏', re:/^(Cough|Sneeze|Throat clearing|Sniff)/},
+  {id:'dog', name:'🐶 狗叫', re:/^(Dog|Bark|Yip|Howl|Bow-wow|Growling|Whimper \(dog\))/},
+  {id:'cat', name:'🐱 猫叫', re:/^(Cat$|Meow|Purr|Hiss|Caterwaul)/},
+  {id:'baby', name:'👶 小孩哭', re:/^(Baby cry|Crying, sobbing|Whimper$)/},
+  {id:'door', name:'🚪 开关门、敲门', re:/^(Door|Slam|Knock|Sliding door|Doorbell|Ding-dong|Cupboard open or close)/},
+  {id:'chair', name:'🪑 拉椅子、摩擦声', re:/^(Scrape|Squeak|Creak|Rub)/},
+  {id:'phone', name:'📱 电话铃、提示音', re:/^(Telephone|Ringtone|Telephone bell ringing|Alarm clock|Beep, bleep)/},
+  {id:'bell', name:'🔔 铃声', re:/^(Bell$|Church bell|Jingle bell|Bicycle bell|Chime)/},
+  {id:'alarm', name:'🚨 警报', re:/^(Siren|Alarm$|Fire alarm|Smoke detector|Civil defense siren|Buzzer)/},
+  {id:'tools', name:'🛠 工具、敲打', re:/^(Tools|Hammer|Power tool|Drill|Sawing|Filing \(rasp\)|Jackhammer|Ratchet)/},
+  {id:'vehicle', name:'🚆 火车、车辆、飞机', re:/^(Train|Rail transport|Railroad car|Vehicle|Car$|Truck|Bus$|Motorcycle|Aircraft|Helicopter|Fixed-wing aircraft)/, stop:'🚆 车辆声停了', span:true},
+  {id:'fan', name:'💨 风扇、空调、机器', re:/^(Mechanical fan|Air conditioning|Engine|Mechanisms|Hum$)/, stop:'💨 机器声停了', span:true},
+  {id:'rain', name:'🌧 下雨、打雷', re:/^(Rain|Thunder|Thunderstorm)/, stop:'🌧 雨停了', span:true},
+];
 const VAD_MUSIC = /^(Music|Musical instrument|Singing|Song|Choir|Chant|Piano|Organ|Keyboard|Guitar|Drum|Hymn|Gospel|Christian music|Pop music|Background music|Orchestra|Lullaby|Electronic music|Rock music|Strum|Bowed string)/;
 const VAD = {
   ok:false, loading:null, clf:null, buf:null, n:0, busy:false, fails:0,
@@ -1489,15 +1511,14 @@ const VAD = {
   },
   run(a, rate, t){
     try {
-      let sp = 0, mu = 0, la = 0, ap = 0;
+      let sp = 0, mu = 0; const sc = {}, want = S.soundTags ? TAG_KINDS.filter(k => k.re && tagOn(k)) : [];
       for (const r of this.clf.classify(a, rate)) for (const c of (r.classifications[0] || {}).categories || []){
         const nm = c.categoryName;
         if (VAD_SPEECH.test(nm)) sp = Math.max(sp, c.score);
         else if (VAD_MUSIC.test(nm)) mu = Math.max(mu, c.score);
-        else if (VAD_LAUGH.test(nm)) la = Math.max(la, c.score);
-        else if (VAD_CLAP.test(nm)) ap = Math.max(ap, c.score);
+        for (const k of want) if (k.re.test(nm)) sc[k.id] = Math.max(sc[k.id] || 0, c.score);
       }
-      soundTags(t, mu >= 0.3, la >= 0.3, ap >= 0.3);
+      sc.music = mu; soundTags(t, sc);
       const speech = sp >= 0.3, music = mu >= 0.3;
       this.sp = sp; this.mu = mu; this.kind = speech && music ? 'mix' : speech ? 'speech' : music ? 'music' : '';
       if (speech) this.speechAt = t;
@@ -1520,15 +1541,18 @@ function showVad(){
 
 // 字幕里插的声音标记（设置里"标出笑声、掌声、音乐"，默认关；待机的时间段总是标）：
 // 一行灰色小字，不翻译，存在 session.tags（{t, tag}），历史记录和导出里按时间插进去
-function soundTags(t, music, laugh, clap){
+const tagOn = k => (S.tagKinds || {})[k.id] ?? !!k.on;
+function soundTags(t, sc){
   if (L.state !== 'running' || !S.soundTags) return;
-  const T = L.tagSt || (L.tagSt = {mOn:false, mRun:0, nRun:0, last:{}});
-  const once = (k, txt) => { if (t - (T.last[k] || -1e9) > 15){ T.last[k] = t; addTag(t, txt); } };
-  if (laugh) once('laugh', '😄 笑声');
-  if (clap) once('clap', '👏 掌声');
-  // 音乐：连着 3 秒才算开始，连着 5 秒没有才算停（免得一两秒的误判来回标）
-  if (music){ T.mRun++; T.nRun = 0; if (!T.mOn && T.mRun >= 3){ T.mOn = true; addTag(t - 3, '🎵 音乐'); } }
-  else { T.nRun++; T.mRun = 0; if (T.mOn && T.nRun >= 5){ T.mOn = false; addTag(t - 5, '🎵 音乐停了'); } }
+  const T = L.tagSt || (L.tagSt = {last:{}, run:{}, off:{}, on:{}});
+  for (const k of TAG_KINDS){
+    if (!tagOn(k)) continue;
+    const hit = (sc[k.id] || 0) >= 0.3;
+    if (!k.span){ if (hit && t - (T.last[k.id] ?? -1e9) > 15){ T.last[k.id] = t; addTag(t, k.name); } continue; }
+    // 一直响的（音乐、风扇、车）：连着 3 秒才算开始，连着 5 秒没有才算停（免得一两秒的误判来回标）
+    if (hit){ T.run[k.id] = (T.run[k.id] || 0) + 1; T.off[k.id] = 0; if (!T.on[k.id] && T.run[k.id] >= 3){ T.on[k.id] = true; addTag(t - 3, k.name); } }
+    else { T.off[k.id] = (T.off[k.id] || 0) + 1; T.run[k.id] = 0; if (T.on[k.id] && T.off[k.id] >= 5){ T.on[k.id] = false; addTag(t - 5, k.stop); } }
+  }
 }
 function addTag(t, tag){
   const g = {t:Math.max(0, Math.round(t * 10) / 10), tag};
@@ -2933,7 +2957,7 @@ function fillSettings(){
   $('#glossary').value = S.glossary;
   $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
   $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
-  $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor; $('#soundTags').checked = !!S.soundTags;
+  $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor; $('#soundTags').checked = !!S.soundTags; fillTagKinds();
   $('#prefModel').innerHTML = '<option value="">自动（按下面的顺序）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#prefModel').value = S.prefModel || '';
   $('#saveDefault').checked = S.saveDefault;
@@ -2978,7 +3002,12 @@ $('#sens').oninput = () => { S.sensitivity = +$('#sens').value; $('#sensV').text
 $('#glossary').onchange = () => { S.glossary = $('#glossary').value; saveSettings(); };
 $('#fs').oninput = () => { S.fontSize = +$('#fs').value; $('#fsV').textContent = S.fontSize + 'px'; applyDisplay(); saveSettings(); };
 $('#curScale').oninput = () => { S.curScale = +$('#curScale').value; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; applyDisplay(); saveSettings(); };
-$('#soundTags').onchange = () => { S.soundTags = $('#soundTags').checked; saveSettings(); };
+$('#soundTags').onchange = () => { S.soundTags = $('#soundTags').checked; saveSettings(); fillTagKinds(); };
+function fillTagKinds(){
+  const box = $('#tagKinds'); box.style.display = S.soundTags ? '' : 'none';
+  box.innerHTML = TAG_KINDS.map(k => `<label><input type="checkbox" data-tk="${k.id}"${tagOn(k) ? ' checked' : ''}>${esc(k.name)}</label>`).join('');
+  box.querySelectorAll('[data-tk]').forEach(c => c.onchange = () => { S.tagKinds = Object.assign({}, S.tagKinds, {[c.dataset.tk]:c.checked}); saveSettings(); });
+}
 $('#curColor').onchange = () => { S.curColor = $('#curColor').value; applyDisplay(); saveSettings(); };
 $('#prefModel').onchange = () => { S.prefModel = $('#prefModel').value; saveSettings(); };
 $('#zhOp').oninput = () => { S.zhOpacity = +$('#zhOp').value; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%'; applyDisplay(); saveSettings(); };
