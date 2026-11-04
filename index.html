@@ -74,6 +74,25 @@ a{color:#7fb7ff}
 .tagkinds input{width:18px;height:18px}
 .stag{color:var(--muted);font-size:13px;text-align:center;margin:-6px 0 14px}
 #subs.follow .stag{opacity:.6}
+/* 问 AI：选中的问题高亮；答案卡片在底栏上面，字幕区跟着变矮 */
+#subs .line.qsel{background:#1c2b3d;border-radius:8px;box-shadow:0 0 0 4px #1c2b3d}
+#subs.follow .line.qsel{opacity:1}
+#subs.asking .line{cursor:pointer}
+#askBox{display:none;max-height:42vh;overflow-y:auto;border-top:1px solid var(--line);background:var(--panel);padding:10px 16px 12px;-webkit-overflow-scrolling:touch}
+#askBox.show{display:block}
+#askBox .ahead{display:flex;align-items:flex-start;gap:10px}
+#askQ{flex:1;font-size:13px;color:var(--muted);line-height:1.4}
+#askClose{padding:6px 12px;font-size:14px}
+.aen{font-size:calc(var(--fs) * 1.05);font-weight:600;line-height:1.4;margin:8px 0 4px;color:#ffd27a}
+.azh{font-size:calc(var(--fs) * .85);line-height:1.5;white-space:pre-wrap}
+.azh.err{color:var(--danger)}
+#askMeta{font-size:11px;color:#56606b;margin-top:6px}
+#askHint{font-size:12px;color:#56606b;margin-top:4px}
+#btnAsk{background:#2b5d8a;color:#fff}
+.qa{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:-4px 0 16px;background:var(--panel)}
+.qa .aq{font-size:13px;color:var(--muted)}
+.qa .aen{font-size:calc(var(--fs) * .9)}
+.qa .azh{font-size:calc(var(--fs) * .8)}
 #jump{position:fixed;right:16px;bottom:calc(env(safe-area-inset-bottom) + 96px);display:none;background:#2d6b4a}
 
 /* bottom bar */
@@ -86,6 +105,9 @@ a{color:#7fb7ff}
 #bottom .mic{font-size:14px;padding:10px 12px;border-radius:12px;color:var(--muted)}
 .tog{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:14px;user-select:none}
 .tog input{width:20px;height:20px}
+#bottom .big{white-space:nowrap}
+/* 手机竖屏上课时按钮多（暂停、结束、问 AI、识别方式），挤一挤；"保存"上课中本来就改不了，先藏起来 */
+@media (max-width:430px){ #bottom{gap:6px;padding-left:10px;padding-right:10px} #bottom .big{padding:12px 11px;font-size:16px} #bottom.run #togSaveL{display:none} #bottom.run .mic{padding:10px 8px} }
 
 /* panels */
 .panel{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;z-index:10}
@@ -156,15 +178,22 @@ a{color:#7fb7ff}
 
 <div id="subs" class="follow"><div class="empty">点"开始"，手机/平板对着讲台<br>英文识别后会显示中文翻译</div></div>
 <button id="jump">↓ 回到最新</button>
+<div id="askBox">
+  <div class="ahead"><div id="askQ"></div><button id="askClose">收起</button></div>
+  <div id="askAns"></div>
+  <div id="askMeta"></div>
+  <div id="askHint">选错了就点正确的那句（点相邻的句子是加上去），会重新问</div>
+</div>
 
 <div id="bottom">
   <button id="btnStart" class="big">开始</button>
   <button id="btnPause" class="big" style="display:none">暂停</button>
   <button id="btnEnd" class="big" style="display:none">结束</button>
+  <button id="btnAsk" class="big" style="display:none">问 AI</button>
   <button id="btnMic" class="mic" aria-label="收音模式">全场</button>
   <button id="btnEng" class="mic" aria-label="识别方式" style="display:none">Deepgram</button>
   <span class="spacer"></span>
-  <label class="tog"><input type="checkbox" id="togSave">保存</label>
+  <label class="tog" id="togSaveL"><input type="checkbox" id="togSave">保存</label>
   <label class="tog"><input type="checkbox" id="togZh">中文</label>
 </div>
 
@@ -258,6 +287,8 @@ a{color:#7fb7ff}
       <h3>翻译模型（从上往下依次尝试，限流自动换下一个）</h3>
       <div class="row"><label>首选模型</label><select id="prefModel"></select></div>
       <div class="hint">选了就先用它，被限流或出错时还是按下面的顺序换别的，不会翻不出来。</div>
+      <div class="row"><label>问 AI 用的模型</label><select id="askModel"></select></div>
+      <div class="hint">上课点"问 AI"时先用它。一次只花一两千字的额度，被限流就按顺序换别的。</div>
       <div id="provList"></div>
       <div class="hint">模型名一般不用改。哪家改了模型名或下线了，在这里改成新名字。</div>
     </div>
@@ -375,7 +406,7 @@ const DEFAULTS = {
   models:{}, enabled:Object.fromEntries(PROVIDERS.map(p => [p.id, true])),
   glossary:DEFAULT_GLOSSARY,
   showZh:true, zhOpacity:0.55, fontSize:22, saveDefault:true, sensitivity:3, keepDays:30,
-  curScale:1.15, curColor:'amber', prefModel:'', soundTags:false, tagKinds:{},
+  curScale:1.15, curColor:'amber', prefModel:'', askModel:'', soundTags:false, tagKinds:{},
 };
 let S;
 function loadSettings(){
@@ -387,7 +418,7 @@ function loadSettings(){
   S.models = Object.assign({}, saved.models || {});
 }
 // 这些跟着账号走，云同步；字号、中文亮度等显示设置、收音模式（每台设备放的位置不一样）每台设备各自保存
-const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'diarize', 'multiLang', 'models', 'enabled', 'prefModel', 'glossary', 'sensitivity'];
+const SYNC_KEYS = ['keys', 'asrEngine', 'dgModel', 'asrModel', 'diarize', 'multiLang', 'models', 'enabled', 'prefModel', 'askModel', 'glossary', 'sensitivity'];
 const syncPart = () => JSON.stringify(SYNC_KEYS.map(k => S[k]));
 let lastSyncPart = '';
 function saveSettings(){
@@ -668,6 +699,14 @@ function errWhy(e){
 // 全部模型都在冷却（不是真出错）：翻译队列等到最早恢复的那个，句子不算失败
 const coolLeft = () => Math.min(...PROVIDERS.filter(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim()).map(p => (cooldown[p.id] || 0) - Date.now()));
 
+// 出错后这个模型歇多久：404 一般是模型下架了，6 小时内别再试；400 多半是参数问题，10 分钟
+function coolDown(p, e){
+  let wait = e.retryAfter || (e.status === 429 ? 60e3 : (e.status === 401 || e.status === 403) ? 3600e3 : e.status === 404 ? 6 * 3600e3 : e.status === 400 ? 600e3 : 20e3);
+  if (/per.?day|daily|RPD|TPD/i.test(e.body || '')) wait = Math.max(wait, 15 * 60e3);
+  cooldown[p.id] = Date.now() + wait;
+  console.warn(p.name, e);
+}
+
 async function translateWithFallback(sys, user){
   let lastErr = null, tried = 0;
   // 设置里选了首选模型就先试它，其余照原来的顺序
@@ -687,11 +726,7 @@ async function translateWithFallback(sys, user){
       provErr[p.id] = errWhy(e);
       log(`翻译失败 ${p.name} ${((Date.now() - t0) / 1000).toFixed(1)}秒：${provErr[p.id]}${e.retryAfter ? `，${Math.ceil(e.retryAfter / 1000)} 秒后再试` : ''}｜${netMsg(e).slice(0, 120)}`);
       lastErr = e;
-      // 404 一般是模型下架了，6 小时内别再试；400 多半是参数问题，10 分钟
-      let wait = e.retryAfter || (e.status === 429 ? 60e3 : (e.status === 401 || e.status === 403) ? 3600e3 : e.status === 404 ? 6 * 3600e3 : e.status === 400 ? 600e3 : 20e3);
-      if (/per.?day|daily|RPD|TPD/i.test(e.body || '')) wait = Math.max(wait, 15 * 60e3);
-      cooldown[p.id] = Date.now() + wait;
-      console.warn(p.name, e);
+      coolDown(p, e);
     }
   }
   if (lastErr) throw lastErr;
@@ -976,8 +1011,9 @@ async function start(){
 
   L.engine = engine;
   Object.assign(L, {rmsH:[], nf:0, binSq:0, binT:0, whisperAt:0, whisperN:0, whisperManual:false,
-    standby:false, standbyAt:0, wakeAt:0, pre:[], loudAt:-1e9, loudRun:0, lastLineAt:0, tags:[], tagSt:null, sbTag:null});
-  if (L.session) L.session.tags = L.tags;
+    standby:false, standbyAt:0, wakeAt:0, pre:[], loudAt:-1e9, loudRun:0, lastLineAt:0, tags:[], tagSt:null, sbTag:null, qa:[]});
+  if (L.session){ L.session.tags = L.tags; L.session.qa = L.qa; }
+  askOpen(false);
   VAD.reset(); VAD.load();
   L.state = 'running';
   log(`开始，${engine === 'dg' ? '实时识别' : '按句识别'}`);
@@ -1562,7 +1598,7 @@ function addTag(t, tag){
   // 正在说的那句还没说完，标记放在它前面
   const cur = last && (last.status === 'live' || last.status === 'asr') && document.getElementById('ln' + last.id);
   if (cur) box.insertBefore(el, cur); else box.appendChild(el);
-  if (stick) box.scrollTop = box.scrollHeight;
+  if (stick && !askHold()) box.scrollTop = box.scrollHeight;
   if (L.session) dirty(L.session, L.lines);
   return g;
 }
@@ -1932,7 +1968,7 @@ const Cloud = {
     // 历史记录：一节课一个文件，谁新用谁的（录音在下面单独传）
     const local = (await DB.allSessions()) || [];
     const localIds = new Set(local.map(s => s.id));
-    const pack = s => Object.assign({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], tags:s.tags || [], updatedAt:s.updatedAt || 0},
+    const pack = s => Object.assign({id:s.id, title:s.title, createdAt:s.createdAt, duration:s.duration, status:s.status, device:s.device, segs:s.segs || [], lines:s.lines || [], tags:s.tags || [], qa:s.qa || [], updatedAt:s.updatedAt || 0},
       s.refined ? {refined:s.refined, liveLines:s.liveLines} : {});
     for (const s0 of local){
       const live = L.state !== 'idle' && L.session && L.session.id === s0.id;
@@ -2144,10 +2180,10 @@ function paintLine(l){
   const empty = box.querySelector('.empty'); if (empty) empty.remove();
   let el = document.getElementById('ln' + l.id);
   if (!el){ el = document.createElement('div'); el.id = 'ln' + l.id; box.appendChild(el); if (!stick) showJump(++newSince); }
-  el.className = 'line ' + l.status;
+  el.className = 'line ' + l.status + (ASK.sel.includes(l) ? ' qsel' : '');
   el.innerHTML = lineHtml(l);
   markRecent();
-  if (stick) box.scrollTop = box.scrollHeight;
+  if (stick && !askHold()) box.scrollTop = box.scrollHeight;
 }
 // 正在说的那句（cur）放大、左边色条；刚说完的两句（recent）和它的中文全亮；
 // 再往上越来越淡（f1~f4，跟随最新时才淡，CSS #subs.follow）
@@ -2205,6 +2241,184 @@ function showJump(n){ const j = $('#jump'); j.style.display = stick ? 'none' : '
 function toLatest(){ const b = $('#subs'); setStick(true); b.scrollTop = b.scrollHeight; }
 $('#jump').onclick = toLatest;
 
+/* ================= 问 AI（课堂抢答） ================= */
+// 点"问 AI"：自动选最近一个问题（带问号或 what/why/how 开头，连上被断开的前半句），发给 AI。
+// 答案先出一句能直接说出口的英文，再出中文解释，边生成边显示。
+// 选错了点正确的那句（点紧挨着的句子是加上去），停手 0.8 秒后重新问，替换掉刚才那条问答
+const ASK = {open:false, sel:[], ac:null, timer:null, seq:0, last:null};
+const ASK_PROMPT = `You help a student in an HVAC / gas technician college class (Ontario, Canada; G3/G2 gas technician program) answer the instructor's question out loud, fast.
+The lecture text is live speech recognition and may contain errors; infer what the instructor meant from the context.
+Use Canadian / Ontario rules and practice: CSA B149.1 / B149.2, TSSA, Ontario codes, units as normally used in Ontario trades. Do not use US codes (NFPA 54 etc.) unless asked.
+Answer in exactly this format:
+EN: <the answer as one short spoken English sentence (max 25 words) the student can say out loud>
+中文：<1-3 short sentences in Simplified Chinese: explain the answer, key numbers/units, code reference if relevant>
+Rules:
+- If you are not sure about a specific number or code clause, say "not sure" and do not make up numbers.
+- If the selected text is not really a question, briefly explain what the instructor means, in the same format.
+- No other text.`;
+const Q_RE = /\?|^\W*(what|why|how|which|who|when|where|can|could|does|do|did|is|are|was|were|should|would|will|anyone|anybody|somebody|tell me|name|give me|explain)\b/i;
+const lineText = l => sureText((l.en || '') + (l.status === 'live' && l.im ? ' ' + l.im : ''));
+// 手指刚碰过字幕（3 秒内），答案卡片开着时字幕先别自动往上滚，免得点的那句被推走
+const askHold = () => ASK.open && Date.now() - touchAt < 3000;
+function pickQuestion(){
+  const ls = L.lines, n = ls.length; if (!n) return [];
+  let i = -1;
+  for (let k = n - 1; k >= Math.max(0, n - 6); k--) if (Q_RE.test(lineText(ls[k]))){ i = k; break; }
+  if (i < 0) return ls.slice(Math.max(0, n - 2)).filter(l => lineText(l));   // 找不到像问题的，就拿最近两句
+  let a = i, b = i;
+  // 问题被断成两行：前一行没说完（不是句号结尾）就连上，最多往前两行；这行没问号、下一行有问号也连上
+  while (a > 0 && i - a < 2 && !SENT_END.test(sureText(ls[a - 1].en)) && ls[a - 1].spk === ls[i].spk) a--;
+  if (!/\?/.test(lineText(ls[i])) && b + 1 < n && /\?/.test(lineText(ls[b + 1]))) b++;
+  return ls.slice(a, b + 1);
+}
+function showSel(){
+  document.querySelectorAll('#subs .line.qsel').forEach(e => e.classList.remove('qsel'));
+  ASK.sel.forEach(l => { const e = document.getElementById('ln' + l.id); if (e) e.classList.add('qsel'); });
+  $('#askQ').textContent = ASK.sel.length ? '问：' + ASK.sel.map(lineText).join(' ') : '';
+}
+function askOpen(v){
+  ASK.open = v; ASK.seq++;
+  $('#askBox').classList.toggle('show', v); $('#subs').classList.toggle('asking', v);
+  if (!v){ clearTimeout(ASK.timer); if (ASK.ac) ASK.ac.abort(); ASK.sel = []; ASK.last = null; showSel(); }
+  if (stick){ const b = $('#subs'); b.scrollTop = b.scrollHeight; }
+}
+function answerHtml(s){
+  s = String(s || '').replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim();
+  const m = s.match(/^[\s*]*EN[\s*]*[:：]\s*([\s\S]*?)(?:\n+[\s*]*中文[\s*]*[:：]\s*([\s\S]*))?$/i);
+  if (!m) return `<div class="azh">${esc(s)}</div>`;
+  return `<div class="aen">${esc(m[1].replace(/\*+/g, '').trim())}</div>` + (m[2] ? `<div class="azh">${esc(m[2].replace(/\*+/g, '').trim())}</div>` : '');
+}
+// 流式调用（边生成边显示），先用设置里"问 AI 用的模型"，没选就先 gpt-oss-120b；出错按顺序换下一个
+async function streamProvider(p, sys, user, onText, signal){
+  const model = modelOf(p), key = (S.keys[p.keyName] || '').trim();
+  let url, mk, pick, hasExtra;
+  if (p.kind === 'gemini'){
+    url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(key)}`;
+    hasExtra = !p.noSys;
+    mk = plain => JSON.stringify(p.noSys ? {contents:[{role:'user', parts:[{text:sys + '\n\n' + user}]}], generationConfig:{temperature:0.3, maxOutputTokens:800}}
+      : {systemInstruction:{parts:[{text:sys}]}, contents:[{role:'user', parts:[{text:user}]}],
+         generationConfig:Object.assign({temperature:0.3, maxOutputTokens:800}, plain ? {} : {thinkingConfig:{thinkingBudget:0}})});
+    pick = j => ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).map(x => x.text || '').join('');
+  } else {
+    url = p.base + '/chat/completions';
+    hasExtra = !!p.extra;
+    mk = plain => JSON.stringify(Object.assign({model, messages:[{role:'system', content:sys}, {role:'user', content:user + (p.suffix || '')}], temperature:0.3, max_tokens:1500, stream:true}, plain ? {} : p.extra || {}));
+    pick = j => (j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content) || '';
+  }
+  const ac = new AbortController(), kill = () => ac.abort();
+  signal.addEventListener('abort', kill);
+  let idle = setTimeout(kill, 20000);   // 20 秒没回应就换下一个
+  const headers = p.kind === 'gemini' ? {'Content-Type':'application/json'} : {'Content-Type':'application/json', Authorization:'Bearer ' + key};
+  let text = '';
+  try {
+    let res = await fetch(url, {method:'POST', headers, body:mk(false), signal:ac.signal});
+    if (res.status === 400 && hasExtra) res = await fetch(url, {method:'POST', headers, body:mk(true), signal:ac.signal});
+    if (!res.ok) throw await httpErr(res);
+    const rd = res.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    for (;;){
+      const {done, value} = await rd.read();
+      if (done) break;
+      clearTimeout(idle); idle = setTimeout(kill, 15000);
+      buf += dec.decode(value, {stream:true});
+      const parts = buf.split('\n'); buf = parts.pop();
+      for (const ln of parts){
+        const d = ln.replace(/^data:\s*/, '').trim();
+        if (!ln.startsWith('data:') || !d || d === '[DONE]') continue;
+        try { const add = pick(JSON.parse(d)); if (add){ text += add; onText(text); } } catch(e){}
+      }
+    }
+  } catch(e){ if (!text || signal.aborted) throw e; }   // 已经出了一部分字又断了，就用出来的部分
+  finally { clearTimeout(idle); signal.removeEventListener('abort', kill); }
+  if (!text.trim()) throw new Error('空结果');
+  return text;
+}
+async function askStream(sys, user, onText, signal){
+  const first = S.askModel || 'groq-gptoss';
+  const order = PROVIDERS.filter(p => p.id === first).concat(PROVIDERS.filter(p => p.id !== first));
+  let lastErr = null;
+  for (const p of order){
+    if (!S.enabled[p.id] || !(S.keys[p.keyName] || '').trim()) continue;
+    if ((cooldown[p.id] || 0) > Date.now()) continue;
+    try { return {p, text:await streamProvider(p, sys, user, onText, signal)}; }
+    catch(e){
+      if (signal.aborted) throw e;
+      provErr[p.id] = errWhy(e); lastErr = e;
+      log(`问 AI 失败 ${p.name}：${provErr[p.id]}｜${netMsg(e).slice(0, 120)}`);
+      coolDown(p, e);
+    }
+  }
+  throw lastErr || new Error(isFinite(coolLeft()) ? '模型都在限流冷却中，过一会再试' : '没有可用的模型（检查 key 和开关）');
+}
+async function askNow(replace){
+  clearTimeout(ASK.timer);
+  if (ASK.ac) ASK.ac.abort();
+  const my = ++ASK.seq, sel = ASK.sel.slice(); if (!sel.length) return;
+  const ac = ASK.ac = new AbortController(), ans = $('#askAns'), meta = $('#askMeta');
+  meta.textContent = '';
+  // 选中的句子还没说完（灰字），等它定稿再问，最多等 1.5 秒
+  if (sel.some(l => l.status === 'live' || l.status === 'asr')){
+    ans.innerHTML = '<div class="azh">等这句说完…</div>';
+    const t0 = Date.now();
+    while (sel.some(l => l.status === 'live' || l.status === 'asr') && Date.now() - t0 < 1500) await new Promise(r => setTimeout(r, 100));
+    if (my !== ASK.seq) return;
+  }
+  showSel();
+  const q = sel.map(lineText).join(' ');
+  if (!q){ ans.innerHTML = '<div class="azh">这句还没有字，点别的句子试试</div>'; return; }
+  const i0 = L.lines.indexOf(sel[0]);
+  const ctx = L.lines.slice(Math.max(0, i0 - 12), Math.max(0, i0)).map(lineText).filter(Boolean);
+  const gl = glossaryFor(q + ' ' + ctx.join(' '));
+  let u = '';
+  if (gl.length) u += 'Glossary (English = Chinese):\n' + gl.map(g => `- ${g.en} = ${g.zh}`).join('\n') + '\n\n';
+  if (ctx.length) u += 'Lecture just before (most recent last):\n' + ctx.join('\n') + '\n\n';
+  u += 'The instructor just said / asked:\n' + q;
+  ans.innerHTML = '<div class="azh">正在问…</div>';
+  const t0 = Date.now();
+  try {
+    const {p, text} = await askStream(ASK_PROMPT, u, s => { if (my === ASK.seq){ ans.innerHTML = answerHtml(s); askFit(); } }, ac.signal);
+    if (my !== ASK.seq) return;
+    ans.innerHTML = answerHtml(text); askFit();
+    const sec = ((Date.now() - t0) / 1000).toFixed(1);
+    meta.textContent = `${p.name} · ${sec} 秒`; askFit();
+    log(`问 AI ${p.name} ${sec}秒`);
+    const rec = {t:Math.round(sel[sel.length - 1].t * 100 + 1) / 100, q, a:cleanOut(text).replace(/<think>[\s\S]*$/, '').trim(), m:p.name};
+    if (!L.qa) L.qa = [];
+    // 点句子改选的，替换刚才那条（问错了的不留）；按"问 AI"按钮问的是新的一条
+    const k = replace && ASK.last ? L.qa.indexOf(ASK.last) : -1;
+    if (k >= 0) L.qa[k] = rec; else L.qa.push(rec);
+    ASK.last = rec;
+    if (L.session){ L.session.qa = L.qa; dirty(L.session, L.lines); }
+  } catch(e){
+    if (my !== ASK.seq) return;
+    ans.innerHTML = `<div class="azh err">没问到：${esc(e.status ? errWhy(e) : e.name === 'AbortError' ? '超时' : e.message)}</div>`;
+  }
+}
+$('#btnAsk').onclick = () => {
+  const sel = pickQuestion();
+  if (!sel.length){ toast('还没有字幕'); return; }
+  if (!PROVIDERS.some(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim())){ toast('先在设置里填翻译用的 key'); return; }
+  ASK.sel = sel; askOpen(true); showSel(); askNow(false);
+};
+$('#askClose').onclick = () => askOpen(false);
+// 答案卡片变高、字幕区变矮时，跟随最新的话保持在最底下
+function askFit(){ const b = $('#subs'); if (stick && !askHold()) b.scrollTop = b.scrollHeight; }
+if (window.ResizeObserver) new ResizeObserver(askFit).observe($('#subs'));
+// 答案卡片开着时点字幕：点紧挨着选中部分的句子是加上去，点别的是换成那句；点选中部分两头的句子是去掉
+$('#subs').addEventListener('click', e => {
+  if (!ASK.open) return;
+  const el = e.target.closest('.line'); if (!el) return;
+  const l = L.lines.find(x => 'ln' + x.id === el.id); if (!l) return;
+  const s = ASK.sel, k = L.lines.indexOf(l), a = s.length ? L.lines.indexOf(s[0]) : -9, b = s.length ? L.lines.indexOf(s[s.length - 1]) : -9;
+  if (s.includes(l)){ if (s.length > 1 && (l === s[0] || l === s[s.length - 1])) ASK.sel = s.filter(x => x !== l); else return; }
+  else if (s.length && s.length < 5 && (k === a - 1 || k === b + 1)) ASK.sel = k < a ? [l].concat(s) : s.concat([l]);
+  else ASK.sel = [l];
+  showSel();
+  if (ASK.ac) ASK.ac.abort();
+  $('#askAns').innerHTML = '<div class="azh">选好了就停手，马上重新问…</div>'; $('#askMeta').textContent = '';
+  clearTimeout(ASK.timer); ASK.timer = setTimeout(() => askNow(true), 800);
+});
+
 function updateButtons(){
   const st = L.state;
   $('#btnStart').style.display = st === 'idle' ? '' : 'none';
@@ -2213,6 +2427,8 @@ function updateButtons(){
   $('#btnPause').textContent = st === 'paused' ? '继续' : '暂停';
   $('#togSave').disabled = st !== 'idle';
   $('#btnMic').style.display = st === 'idle' ? '' : 'none';   // 收音模式点"开始"时才生效，上课中不显示
+  $('#btnAsk').style.display = st === 'idle' ? 'none' : '';
+  $('#bottom').classList.toggle('run', st !== 'idle');
   showEngine(); showVad();
   if (st === 'idle') $('#clock').textContent = '00:00';
 }
@@ -2868,8 +3084,11 @@ function renderSessLines(){
   const lines = P.view === 'live' && curSess.liveLines ? curSess.liveLines : (curSess.lines || []);
   const box = $('#sessLines');
   // 声音标记（笑声、音乐、待机）按时间插在句子之间；不是 .line，不影响按序号找句子
-  const tags = (curSess.tags || []).slice().sort((a, b) => a.t - b.t); let ti = 0;
-  const tagHtml = upTo => { let h = ''; while (ti < tags.length && tags[ti].t < upTo) h += `<div class="stag">${esc(tags[ti++].tag)}</div>`; return h; };
+  // 问 AI 的问答也按时间插进去（.qa，同样不是 .line）
+  const tags = (curSess.tags || []).map(g => ({t:g.t, h:`<div class="stag">${esc(g.tag)}</div>`}))
+    .concat((curSess.qa || []).map(x => ({t:x.t, h:`<div class="qa"><div class="aq">问 AI：${esc(x.q)}</div>${answerHtml(x.a)}</div>`})))
+    .sort((a, b) => a.t - b.t); let ti = 0;
+  const tagHtml = upTo => { let h = ''; while (ti < tags.length && tags[ti].t < upTo) h += tags[ti++].h; return h; };
   box.innerHTML = (lines.map((l, i) => tagHtml(l.t) + `<div class="line" data-i="${i}"><div class="t">${fmtT(l.t)}${spkTag(l.spk)}${langTag(lineLang(l))}</div><div class="en">${enWordsHtml(l.en)}</div><div class="zh">${esc(l.zh)}</div></div>`).join('') + tagHtml(Infinity)) || '<div class="hint">没有内容</div>';
   Object.assign(HL, {lines, times:[], els:[...box.querySelectorAll('.line')], li:-1, wi:-1});
   if (P.i >= 0) plHL(plCur(), true);   // 精修中途重画了，高亮接着
@@ -2910,7 +3129,8 @@ function sessionText(s){
   const plain = t => cjkTight((t || '').replace(/⟦([^⟧]*)⟧?/g, '($1?)'));   // 存疑的词写成 (xxx?)
   const lang = c => { c = langCode(c); return c && c !== 'en' ? `[${LANG_NAMES[c] || c.toUpperCase()}] ` : ''; };
   const items = (s.lines || []).map(l => ({t:l.t, s:`[${fmtT(l.t)}] ${spkName(l.spk) ? spkName(l.spk) + '：' : ''}${lang(lineLang(l))}${plain(l.en)}\n${l.zh || ''}\n`}))
-    .concat((s.tags || []).map(g => ({t:g.t, s:`[${fmtT(g.t)}] [${g.tag.replace(/^\S+\s/, '')}]\n`})));   // 声音标记写成 [笑声]
+    .concat((s.tags || []).map(g => ({t:g.t, s:`[${fmtT(g.t)}] [${g.tag.replace(/^\S+\s/, '')}]\n`})))   // 声音标记写成 [笑声]
+    .concat((s.qa || []).map(x => ({t:x.t, s:`[${fmtT(x.t)}] 【问 AI】${x.q}\n${String(x.a || '').replace(/^[\s*]*EN[\s*]*[:：]\s*/i, '').trim()}\n`})));
   return head + items.sort((a, b) => a.t - b.t).map(x => x.s).join('\n');
 }
 $('#btnExportTxt').onclick = () => {
@@ -2960,6 +3180,8 @@ function fillSettings(){
   $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor; $('#soundTags').checked = !!S.soundTags; fillTagKinds();
   $('#prefModel').innerHTML = '<option value="">自动（按下面的顺序）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#prefModel').value = S.prefModel || '';
+  $('#askModel').innerHTML = '<option value="">自动（gpt-oss-120b，限流再换）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#askModel').value = S.askModel || '';
   $('#saveDefault').checked = S.saveDefault;
   $('#keepDays').value = S.keepDays;
   if (!$('#cmpText').value) $('#cmpText').value = 'Before you light the furnace, check the inlet and manifold pressure with a manometer, and make sure the inducer motor proves the pressure switch.';
@@ -3010,6 +3232,7 @@ function fillTagKinds(){
 }
 $('#curColor').onchange = () => { S.curColor = $('#curColor').value; applyDisplay(); saveSettings(); };
 $('#prefModel').onchange = () => { S.prefModel = $('#prefModel').value; saveSettings(); };
+$('#askModel').onchange = () => { S.askModel = $('#askModel').value; saveSettings(); };
 $('#zhOp').oninput = () => { S.zhOpacity = +$('#zhOp').value; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%'; applyDisplay(); saveSettings(); };
 $('#saveDefault').onchange = () => { S.saveDefault = $('#saveDefault').checked; if (L.state === 'idle') $('#togSave').checked = S.saveDefault; saveSettings(); };
 
