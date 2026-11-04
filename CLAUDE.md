@@ -68,7 +68,7 @@
 | `whisperRange` `whisperFile` `whisperFake` `refineWhisper` `wordsToLines` | 精修里的 Whisper：10 分钟一块、逐词时间、去掉瞎编句 |
 | `openSession` `renderSessLines` `sessionText` | 历史记录详情页、导出文字格式 |
 | `setMicMode` `showMicMode` `#btnMic` | 收音模式（主界面"全场/近处"按钮） |
-| `/* === 问 AI` `ASK` `ASK_PROMPT` `pickQuestion` `askNow` `askStream` `streamProvider` `answerHtml` `#askBox` | 上课点"问 AI"抢答：自动选最近的问题、流式回答、问答存 `session.qa` |
+| `/* === 问 AI` `ASK` `ASK_PROMPT` `pickQuestion` `askNow` `askStream` `streamProvider` `parseAns` `answerHtml` `askMini` `starShow` `#askBox` `#sessFilter` | 上课点"提示"抢答：自动选最近的问题、流式回答、三层答案、收藏、缩成一行；问答存 `session.qa` |
 
 ## 踩过的坑和定下的做法（别改回去）
 
@@ -106,11 +106,14 @@
 - **Whisper 过滤**（`transcribe`）：段的 no_speech_prob>0.5、avg_logprob<-1、(no_speech>0.25 且 logprob<-0.6)、compression_ratio>2.4 都丢；多语言模式下认成非中英文又没把握的丢；`HALLU_ANY` 各语言片尾词（订阅、字幕、ご視聴…）整句丢并记日志
 - **没在 iPad 上测过**：YAMNet 能不能加载、每秒多耗多少电、会不会卡采音
 
-### 问 AI（11/4 做的，还没在课上用过）
-- 只做手动：上课中底栏"问 AI"按钮，一按就自动选最近 6 句里最后一个像问题的（问号或 what/why/how/is/can… 开头），前一行没句号结尾、同一说话人就连上（最多往前 2 行）；找不到就选最近 2 句。选中的是灰字就等定稿，最多 1.5 秒
+### 提示（问 AI，11/4 做的，还没在课上用过）
+- 按钮叫"提示"（用户不想屏幕上出现"AI"二字，同学瞄到不显眼），代码里还叫 ASK
+- 只做手动：上课中底栏"提示"按钮，一按就自动选最近 6 句里最后一个像问题的（问号或 what/why/how/is/can… 开头），前一行没句号结尾、同一说话人就连上（最多往前 2 行）；找不到就选最近 2 句。选中的是灰字就等定稿，最多 1.5 秒
 - 答案卡片开着时点字幕：紧挨着选中部分的句子是加上，两头的是去掉，别的是换成那句；停手 0.8 秒重新问，**替换**刚才那条问答（按按钮问的才是新的一条）。手指碰字幕 3 秒内不自动往上滚（`askHold`）
-- 回答：流式（OpenAI 兼容 `stream:true`、Gemini `streamGenerateContent?alt=sse`），格式 `EN:` 一句能说出口的英文 + `中文：` 解释；提示词要求按加拿大 CSA B149 / TSSA，不确定的数字说 not sure。带前 12 句和术语表。默认先用 gpt-oss-120b（一次只花一两千 token），设置"问 AI 用的模型" `S.askModel`（云同步），失败照 `PROVIDERS` 顺序换，和翻译共用冷却 `coolDown`
-- 问答存 `session.qa`（`{t, q, a, m}`，t 是问题最后一句 +0.01 秒，排在问题后面），跟着云同步；历史记录按时间插成 `.qa` 卡片（不是 `.line`），导出写成 `【问 AI】`
+- 回答：流式（OpenAI 兼容 `stream:true`、Gemini `streamGenerateContent?alt=sse`），三层格式 `SHORT:` 几个词的短答案（像同学喊出来的，大字黄色）+ `中文：` 一句 + `DETAIL:` 详细（中文，默认收起，点"详细 ▾"展开，同一次请求要回来，点开不用等）；`parseAns` 兼容老格式 `EN:`；提示词要求按加拿大 CSA B149 / TSSA，不确定的数字说 not sure。带前 12 句和术语表。默认先用 gpt-oss-120b（一次只花一两千 token），设置"问 AI 用的模型" `S.askModel`（云同步），失败照 `PROVIDERS` 顺序换，和翻译共用冷却 `coolDown`
+- ☆ 收藏（`rec.star`）：卡片右上角，改选替换时星号带过来；答完 60 秒没碰卡片就缩成一行只剩短答案（`askMini`），点卡片展开
+- 历史记录详情页 `#sessFilter`：全部字幕 / 只看提示 / 只看收藏；卡片上可点 ☆；点卡片从问题前 8 秒播
+- 问答存 `session.qa`（`{t, q, a, m, star}`，t 是问题最后一句 +0.01 秒，排在问题后面），跟着云同步；历史记录按时间插成 `.qa` 卡片（不是 `.line`），导出写成 `【提示 ⭐】问题 / 答：短答案 / 中文 / 详细：…`
 - 手机窄屏（≤430px）上课时底栏挤：按钮缩小、藏掉"保存"（上课中本来改不了）
 - 不查教材、不上网搜（教材不能进公开仓库）；以后要做就放本机或 Drive 隐藏数据
 
@@ -153,7 +156,7 @@
 ## 待办
 
 ### 等用户上课测试（测完让用户点"复制全部日志"发来）
-- **问 AI**：自动选的问题对不对、答案出来要几秒、点句子改选顺不顺手；iPhone mini 上底栏按钮挤不挤
+- **提示**：短答案够不够短、自动选的问题对不对、答案出来要几秒、点句子改选顺不顺手；iPhone mini 上底栏按钮挤不挤
 - **说话判断和待机**：日志里有没有"说话判断（YAMNet）已加载"；顶上 🗣/🎵 标记准不准；没人说话 1 分钟是否待机（💤）、有人说话是否马上恢复且开头不丢字；iPad 会不会更费电、发热、采音变少
 - **11/2 改的翻译和切换**：还会不会出现"翻译失败"；设置页模型列表里 Qwen 3.8 27B、gpt-oss-20b、Gemini Flash、Gemma 是否"可用"（模型名对不对）；唱歌放音乐时还会不会切 Whisper（日志每分钟概况里有"背景声 xxdB"）；自动切回 Deepgram 是否正常
 - **iPhone 自动音量**：绿色音量条能不能动到一半左右；Deepgram 会不会还是两句后停；日志里"原始音量 / 自动放大 +xxdB / Deepgram 回了几个词"
