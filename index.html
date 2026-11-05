@@ -347,7 +347,7 @@ body.hasRef #btnBook{display:inline-block}
       <div class="row"><label>首选模型</label><select id="prefModel"></select></div>
       <div class="hint">选了就先用它，被限流或出错时还是按下面的顺序换别的，不会翻不出来。</div>
       <div class="row"><label>"提示"用的模型</label><select id="askModel"></select></div>
-      <div class="hint">上课点"提示"时先用它。默认 Gemini Flash（免费每天只有 20 次，会先想一下再答，慢一点），不行就换 gpt-oss-120b，再按顺序换别的；卡片上也能"换模型再问"。Gemini Flash 不用来翻译。</div>
+      <div class="hint">上课点"提示"时先用它。默认 gpt-oss-120b（快），不行按顺序换别的；想对比答案可以在卡片上"换模型再问"选 Gemini Flash（免费每天只有 20 次，常太忙）。Gemini Flash 不用来翻译。</div>
       <div id="provList"></div>
       <div class="hint">模型名一般不用改。哪家改了模型名或下线了，在这里改成新名字。</div>
     </div>
@@ -465,7 +465,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/5 13:35';
+const APP_VER = '11/5 14:20';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2703,7 +2703,7 @@ document.addEventListener('click', e => {
   const on = box.classList.toggle('det');
   box.querySelectorAll('.adetb').forEach(x => x.textContent = on ? '收起详细 ▴' : '详细 ▾');
 }, true);
-// 流式调用（边生成边显示），先用设置里"提示用的模型"，没选就先 Gemini Flash（答 HVAC 比 gpt-oss 准）；出错按顺序换下一个
+// 流式调用（边生成边显示），先用设置里"提示用的模型"，没选就先 gpt-oss-120b；出错按顺序换下一个
 async function streamProvider(p, sys, user, onText, signal){
   const model = modelOf(p), key = (S.keys[p.keyName] || '').trim();
   let url, mk, pick, hasExtra;
@@ -2754,8 +2754,8 @@ async function streamProvider(p, sys, user, onText, signal){
 }
 async function askStream(sys, user, onText, signal, force){
   if (force){ const p = PROVIDERS.find(x => x.id === force); return {p, text:await streamProvider(p, sys, user, onText, signal)}; }
-  // 默认 Gemini Flash 先（免费每天 20 次，提示问得不多够用），然后 gpt-oss-120b，再按顺序
-  const first = S.askModel || 'gemini-flash';
+  // 默认 gpt-oss-120b 先（11/5 实测免费 Gemini Flash 常 503 太忙、等 12 秒才换，用户嫌慢），然后按 PROVIDERS 顺序
+  const first = S.askModel || 'groq-gptoss';
   const order = PROVIDERS.filter(p => p.id === first).concat(PROVIDERS.filter(p => p.id !== first));
   let lastErr = null;
   for (const p of order){
@@ -3738,7 +3738,7 @@ function fillSettings(){
   $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor; $('#soundTags').checked = !!S.soundTags; fillTagKinds();
   $('#prefModel').innerHTML = '<option value="">自动（gpt-oss-120b 先，用完换 Qwen）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#prefModel').value = S.prefModel || '';
-  $('#askModel').innerHTML = '<option value="">自动（Gemini Flash，不行换 gpt-oss-120b）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#askModel').innerHTML = '<option value="">自动（gpt-oss-120b，不行按顺序换）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#askModel').value = S.askModel || '';
   $('#saveDefault').checked = S.saveDefault;
   $('#keepDays').value = S.keepDays;
