@@ -467,7 +467,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/5 13:00';
+const APP_VER = '11/5 13:26';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -776,13 +776,14 @@ function coolDown(p, e){
   console.warn(p.name, e);
 }
 
-// 翻译默认顺序：gpt-oss-20b 先，其余照 PROVIDERS，gpt-oss-120b 最后
-const trOrder = () => { const first = PROVIDERS.filter(p => p.id === 'groq-oss20'), last = PROVIDERS.filter(p => p.id === 'groq-gptoss'); return first.concat(PROVIDERS.filter(p => !first.includes(p) && !last.includes(p)), last); };
+// 翻译默认顺序：Qwen 先、gpt-oss-20b 次之，其余照 PROVIDERS，gpt-oss-120b 最后
+// 11/5 用 24 句真实锅炉课字幕对比：Qwen 最快（0.5 秒）、术语对；gpt-oss-20b 把 inducer motor 硬翻成"诱导器电机"、Venturi 不翻、有意思翻错；Flash-Lite 术语最地道但 2.4 秒、免费每分钟次数少，跟不上实时
+const trOrder = () => { const first = ['groq-qwen', 'groq-oss20'].map(id => PROVIDERS.find(p => p.id === id)).filter(Boolean), last = PROVIDERS.filter(p => p.id === 'groq-gptoss'); return first.concat(PROVIDERS.filter(p => !first.includes(p) && !last.includes(p)), last); };
 async function translateWithFallback(sys, user){
   let lastErr = null, tried = 0;
   // 设置里选了首选模型就先试它，其余照原来的顺序
   // 没选首选模型时：gpt-oss-120b 放最后，留给"提示"。实时翻译约 3 秒一次、每次 500–600 token，40 分钟左右就能用光一个模型一天的 20 万
-  // （11/5 上课 50 分钟时 gpt-oss-120b 已用光，提示只能换成更弱的 Qwen 答错题）。Groq 每个模型额度分开算，翻译先用 gpt-oss-20b
+  // （11/5 上课 50 分钟时 gpt-oss-120b 已用光，提示只能换成更弱的 Qwen 答错题）。Groq 每个模型额度分开算，翻译先用 Qwen
   const order = S.prefModel ? PROVIDERS.filter(p => p.id === S.prefModel).concat(PROVIDERS.filter(p => p.id !== S.prefModel)) : trOrder();
   for (const p of order){
     if (!S.enabled[p.id] || !(S.keys[p.keyName] || '').trim()) continue;
@@ -3736,7 +3737,7 @@ function fillSettings(){
   $('#fs').value = S.fontSize; $('#fsV').textContent = S.fontSize + 'px';
   $('#zhOp').value = S.zhOpacity; $('#zhOpV').textContent = Math.round(S.zhOpacity * 100) + '%';
   $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor; $('#soundTags').checked = !!S.soundTags; fillTagKinds();
-  $('#prefModel').innerHTML = '<option value="">自动（gpt-oss-20b 先，gpt-oss-120b 最后，留给"提示"）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#prefModel').innerHTML = '<option value="">自动（Qwen 先，gpt-oss-120b 最后，留给"提示"）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#prefModel').value = S.prefModel || '';
   $('#askModel').innerHTML = '<option value="">自动（gpt-oss · Groq，不行再换别的）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#askModel').value = S.askModel || '';
