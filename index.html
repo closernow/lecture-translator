@@ -2408,7 +2408,7 @@ function refSearch(q, k = 6){
 }
 // 老师的说法常和书上不一样（window or door ↔ building opening）：先让快模型把问题换成书上的用词，和原话一起搜
 const RQ_PROMPT = `Turn a question from a gas / HVAC class (live speech recognition, may contain errors) into search keywords for the CSA B149.1 / B149.2 codes and the CSA Gas Trade Training Units (textbooks).
-Output ONE line of 5-15 English keywords and short phrases, using the terms those books use, e.g. "window or door" -> "building opening"; "air the furnace needs" -> "air supply combustion air"; "B vent sticking out of the roof" -> "vent termination roof". Keep the main subject words (appliance, part, number). No explanation.
+Output ONE line of 5-15 English keywords and short phrases, using the terms those books use, e.g. "window or door" -> "building opening"; "air the furnace needs" -> "air supply combustion air"; "B vent sticking out of the roof" -> "vent termination roof". Keep the main subject words (appliance, part, number). Do NOT include book or standard names (CSA, B149, Unit, code). No explanation.
 If it is not a technical question, output "-".`;
 const RQ = new Map();
 async function refQuery(q){
@@ -2419,7 +2419,8 @@ async function refQuery(q){
     try {   // 只试一个、最多等 2.5 秒：慢了就只用原话搜，不耽误出答案
       const out = await Promise.race([callProvider(p, RQ_PROMPT, q), new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 2500))]);
       const kw = cleanOut(out).split('\n').map(x => x.trim()).filter(Boolean)[0] || '';
-      const v = kw.replace(/^(?:search\s*)?keywords?\s*[:：]\s*/i, '').replace(/["“”]/g, '').slice(0, 300);
+      // 去掉书名（CSA B149.1、Unit 13 这种每段都可能有，只会把不相关的段抬上来）
+      const v = kw.replace(/^(?:search\s*)?keywords?\s*[:：]\s*/i, '').replace(/["“”]/g, '').replace(/(?:CSA\s*)?B149(?:\.\d)?(?:-\d+)?|CSA|Unit\s*\d+/gi, ' ').replace(/(?:\s*,\s*){2,}/g, ', ').replace(/\s+/g, ' ').trim().slice(0, 300);
       RQ.set(q, v); return v;
     } catch(e){ log(`换书上说法失败 ${p.name}：${errWhy(e)}`); if (e.status) coolDown(p, e); return ''; }
   }
