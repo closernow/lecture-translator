@@ -2471,7 +2471,7 @@ function srcText(t, q){
 }
 function srcHtml(rec){
   if (!rec) return '';
-  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(refLabel(x))}</b>${x.h && x.h !== x.s ? ' · ' + esc(x.h) : ''}<br>${srcText(x.t || '', rec.quote)}</div>`).join('') + '</div>';
+  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(refLabel(x))}</b>${x.h && x.h !== x.s ? ' · ' + esc(x.h) : ''}<br>${srcText(x.t || '', x.q || rec.quote)}</div>`).join('') + '</div>';
   if (rec.nosrc) return '<div class="srcs"><span class="nosrc">⚠ 没查到出处</span></div>';
   return '';
 }
@@ -2593,7 +2593,7 @@ Book excerpts: if "Book excerpts" (CSA B149 codes and the CSA Gas Trade Training
  Read the excerpt carefully and use the item that matches exactly what was asked (e.g. "a window or door that can be opened" and "a mechanical air-supply inlet" are different items with different distances). If the code value depends on a condition (appliance input in Btu/h, appliance type, natural gas vs propane), SHORT must give the values by condition, briefly, e.g. "6 in / 12 in / 3 ft by input".
 Write exactly these lines: SHORT: / 中文： / DETAIL: as above, then two last lines:
 REF: <situation A: the numbers of the book excerpts you actually used, e.g. "1, 3"; "none" if no excerpts were given or none of them support the answer. Situation B or C: "-">
-QUOTE: <if REF has numbers: copy word for word, exactly as written in the excerpt, the one sentence or list item (max 40 words) that states the answer; otherwise "-">
+QUOTE: <if REF has numbers: for EACH excerpt number in REF, write "[n] " and then copy word for word, exactly as written in that excerpt, the one sentence or list item (max 40 words) that states the answer; separate them with " | ", e.g. "[1] ... | [3] ...". Otherwise "-">
 No other text, no markdown.`;
 // 开始前选的课程（只是参考，模型每次自己按前 30 句判断场合）
 const COURSES = [
@@ -2830,10 +2830,17 @@ async function askNow(replace, force){
     // 出处：模型说用了第几段就记那几段（带原文，资料删了也看得到）；技术题没用上资料的标"没查到出处"
     const ref = parseAns(text).ref, used = [...new Set((ref.match(/\d+/g) || []).map(Number))].map(n => refs[n - 1]).filter(Boolean);
     if (used.length) rec.src = used.map(r => ({b:r.d.b, s:r.d.c.s, h:r.d.c.h, p:r.d.c.p, t:r.d.c.t}));
-    const quote = parseAns(text).quote.replace(/^["“”'\s]+|["“”'\s]+$/g, '');
-    if (used.length && quote && quote !== '-') rec.quote = quote;
+    // 每段原文各自抄的那句：QUOTE: [1] … | [3] …（没写编号的，所有段都拿它去找）
+    const quote = parseAns(text).quote.trim(), qs = {};
+    if (used.length && quote && quote !== '-'){
+      const strip = x => x.replace(/^["“”'\s]+|["“”'\s|]+$/g, '');
+      const parts = quote.split(/\s*\|\s*(?=\[\d+\])/);
+      parts.forEach(x => { const m = x.match(/^\[(\d+)\]\s*([\s\S]*)$/); if (m) qs[m[1]] = strip(m[2]); });
+      if (!Object.keys(qs).length) rec.quote = strip(quote);
+      rec.src.forEach((x, i) => { const n = refs.indexOf(used[i]) + 1; if (qs[n]) x.q = qs[n]; });
+    }
     else if (REF.books.length && !/^\s*-/.test(ref) && L.course !== 'chat') rec.nosrc = true;
-    log(`提示 ${p.name} ${sec}秒，书上说法「${kw}」，查到 ${refs.length} 段${used.length ? '，用了 ' + used.map(r => refLabel({b:r.d.b, s:r.d.c.s, p:r.d.c.p})).join('、') : ''}`);
+    log(`提示 ${p.name} ${sec}秒，书上说法「${kw}」，查到 ${refs.length} 段${used.length ? '，用了 ' + used.map(r => refLabel({b:r.d.b, s:r.d.c.s, p:r.d.c.p})).join('、') : ''}${quote && quote !== '-' ? '，原文那句「' + quote.slice(0, 160) + '」' : ''}`);
     ansShow(text, rec); askFit();
     if (!L.qa) L.qa = [];
     // 点句子改选的，替换刚才那条（问错了的不留，收藏过的星号带过来）；按"提示"按钮问的是新的一条
