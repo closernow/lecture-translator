@@ -467,7 +467,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/4 23:49';
+const APP_VER = '11/4 23:54';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2822,11 +2822,23 @@ async function askNow(replace, force){
   const t0 = Date.now();
   let refs = [], kw = '';
   if (L.course !== 'chat' && REF.docs.length){
-    const rq = refTok(q).length < 5 && ctx.length ? ctx[ctx.length - 1] + ' ' + q : q;
     ans.innerHTML = '<div class="azh">查书…</div>';
-    kw = await refQuery(rq);
-    if (my !== ASK.seq) return;
-    refs = refPick(rq, kw);
+    // 一句里有好几个问题（问号隔开、每个 ≥4 个词）：分开各查各的，同时换说法，每题最多 3 段，合起来最多 6 段
+    // 以前两题合在一起查一次，两个话题互相冲淡，两题都没查到（实测"取暖器软管多长 + 火焰信号多少"）
+    const parts = q.split(/(?<=\?)\s+/).map(x => x.trim()).filter(x => refTok(x).length >= 3);
+    if (parts.length > 1){
+      const kws = await Promise.all(parts.map(x => refQuery(x)));
+      if (my !== ASK.seq) return;
+      kw = kws.join(' / ');
+      const seen = new Set();
+      parts.forEach((x, i) => refPick(x, kws[i]).slice(0, 3).forEach(r => { if (!seen.has(r.d)){ seen.add(r.d); refs.push(r); } }));
+      refs = refs.slice(0, 6);
+    } else {
+      const rq = refTok(q).length < 5 && ctx.length ? ctx[ctx.length - 1] + ' ' + q : q;
+      kw = await refQuery(rq);
+      if (my !== ASK.seq) return;
+      refs = refPick(rq, kw);
+    }
   }
   if (refs.length) u += 'Book excerpts (search results; may be irrelevant):\n' + refs.map((r, i) => `[${i + 1}] ${refLabel({b:r.d.b, s:r.d.c.s, p:r.d.c.p})} (${r.d.c.h}): ${r.d.c.t}`).join('\n\n') + '\n\n';
   u += 'Just said / asked (the selected text):\n' + q;
