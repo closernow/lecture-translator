@@ -172,6 +172,7 @@
 - **自动测试**：`资料/eval.js` + `资料/eval_questions.json`（32 题，带标准答案正则和应引用的出处）。和网页同一流程（从 index.html 取提示词和搜索代码），`node 资料/eval.js [模型id,…] [题号,…]`，报告写 `资料/eval_report.md`；`DRY=1` 只算发出去多少 token、不调 AI。key 在 `资料/keys.json`（gitignore，用户 11/5 从 iPad 设置页截图给的 Groq、Gemini key）。跑一遍很耗额度，别在上课前跑
 - **翻译队列**（`runTr`）：离上次请求不到 3 秒就等，攒几句一起翻，积压时一次最多 8 句；所有模型都在冷却时只等不判失败（以前试 4 次约 32 秒就判"翻译失败"，Gemini 一限流歇 1 分钟，每次丢几句中文）；`provErr` 记失败原因，设置页模型列表显示
 - Gemini：免费层，没开结算（别引导用户开 $300 试用）；模型名用 `gemini-flash-lite-latest`，另加 `gemini-flash-latest`、`gemma-3-27b-it`（Gemma 不支持 systemInstruction，`noSys` 拼进用户消息）；**这两个还没用真 key 验证过**；Flash-Lite 免费每分钟十几次，连着翻约 1 分钟就 429；精修时偶尔"额度用完"429。用户有 Gemini Pro 会员，但那是 App 用的，不给 API 加额度
+- **11/5 用真 key 查的现状**：Groq 只剩 gpt-oss-120b、gpt-oss-20b、qwen3.8-27b（和没用的 allam-2-7b）。Gemini 免费层：`gemini-flash-latest` 现在指向 gemini-3.8-flash，**免费每天只有 20 次**；`gemini-pro-latest`（3.1 Pro）免费层没额度；3.5/3.8 Flash 常 503 太忙；Gemma 4 报 500；只有 Flash-Lite 稳定能用，但答 B149 题答错过（施工取暖器软管答成 100 ft）。所以免费里能当"提示"主力的只有 gpt-oss-120b
 - 硅基流动：有余额，Qwen3-8B / GLM-4-9B 是免费模型
 - 豆包（火山引擎）语音识别不免费（录音文件 0.8 元/小时），而且要请求头鉴权、网页直连不了，要中转服务器；用户决定先不用
 
