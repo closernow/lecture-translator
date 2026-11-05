@@ -36,7 +36,7 @@ a{color:#7fb7ff}
 #top button{padding:8px 12px}
 
 /* subtitles */
-#subs{flex:1;overflow-y:auto;padding:16px 18px 30px;-webkit-overflow-scrolling:touch}
+#subs{flex:1;overflow-y:auto;padding:16px 18px 30px;-webkit-overflow-scrolling:touch;touch-action:manipulation}  /* 双击句子是"提示"，别让 iPad 双击放大 */
 .empty{color:var(--muted);text-align:center;margin-top:30vh;line-height:1.8}
 .line{margin:0 0 18px}
 .line .t{font-size:11px;color:#56606b;font-variant-numeric:tabular-nums}
@@ -100,6 +100,10 @@ a{color:#7fb7ff}
 .azh{font-size:calc(var(--fs) * .85);line-height:1.5;white-space:pre-wrap}
 .azh.err{color:var(--danger)}
 #askMeta{font-size:11px;color:#56606b;margin-top:6px}
+#askAgain{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;font-size:12px;color:#8a949e}
+#askAgain:empty{display:none}
+#askAgain button{font-size:12px;padding:3px 8px;border-radius:8px}
+#askBox.mini #askAgain{display:none}
 #askHint{font-size:12px;color:#56606b;margin-top:4px}
 #btnAsk{background:#2b5d8a;color:#fff}
 .qa{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:-4px 0 16px;background:var(--panel)}
@@ -222,6 +226,7 @@ body.hasRef #btnBook{display:inline-block}
   <div class="ahead"><div id="askQ"></div><button id="askStar" class="star" disabled aria-label="收藏">☆</button><button id="askClose">收起</button></div>
   <div id="askAns"></div>
   <div id="askMeta"></div>
+  <div id="askAgain"></div>
   <div id="askHint">选错了就点正确的那句（点相邻的句子是加上去），会重新问</div>
 </div>
 
@@ -2697,8 +2702,9 @@ async function streamProvider(p, sys, user, onText, signal){
   if (!text.trim()) throw new Error('空结果');
   return text;
 }
-async function askStream(sys, user, onText, signal){
-  const first = S.askModel || 'gemini-flash';
+async function askStream(sys, user, onText, signal, force){
+  if (force){ const p = PROVIDERS.find(x => x.id === force); return {p, text:await streamProvider(p, sys, user, onText, signal)}; }
+  const first = S.askModel || 'groq-gptoss';
   const order = PROVIDERS.filter(p => p.id === first).concat(PROVIDERS.filter(p => p.id !== first));
   let lastErr = null;
   for (const p of order){
@@ -2725,11 +2731,24 @@ function askMini(v){
   if (!v && ASK.open && ASK.last && !ASK.ac) ASK.mini = setTimeout(() => askMini(true), 60000);
   askFit();
 }
+// "换模型再问"：列出有 key、开着、没在冷却的模型，点哪个就只用哪个再问一次（新的一条，原来那条留着对比）
+function againShow(){
+  const box = $('#askAgain'), r = ASK.last;
+  if (!r || ASK.ac){ box.innerHTML = ''; return; }
+  const ps = PROVIDERS.filter(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim() && /^(groq-gptoss|gemini-flash|groq-qwen)$/.test(p.id));
+  box.innerHTML = ps.length ? '换模型再问：' + ps.map(p => `<button data-again="${p.id}">${esc(p.name.replace(/ · .*/, ''))}</button>`).join('') : '';
+}
+$('#askAgain').addEventListener('click', e => {
+  const b = e.target.closest('[data-again]'); if (!b) return;
+  e.stopPropagation();
+  if (!ASK.sel.length) return;
+  askNow(false, b.dataset.again);
+});
 function starShow(){
   const b = $('#askStar'), r = ASK.last;
-  b.disabled = !r; b.classList.toggle('on', !!(r && r.star)); b.textContent = r && r.star ? '★' : '☆';
+  b.disabled = !r; b.classList.toggle('on', !!(r && r.star)); againShow(); b.textContent = r && r.star ? '★' : '☆';
 }
-async function askNow(replace){
+async function askNow(replace, force){
   clearTimeout(ASK.timer); clearTimeout(ASK.mini);
   $('#askBox').classList.remove('mini', 'det');
   if (ASK.ac) ASK.ac.abort();
@@ -2770,7 +2789,7 @@ async function askNow(replace){
   u += 'Just said / asked (the selected text):\n' + q;
   ans.innerHTML = '<div class="azh">想一下…</div>';
   try {
-    const {p, text} = await askStream(ASK_PROMPT, u, s => { if (my === ASK.seq){ ansShow(s); askFit(); } }, ac.signal);
+    const {p, text} = await askStream(ASK_PROMPT, u, s => { if (my === ASK.seq){ ansShow(s); askFit(); } }, ac.signal, force);
     if (my !== ASK.seq) return;
     const sec = ((Date.now() - t0) / 1000).toFixed(1);
     meta.textContent = `${p.name} · ${sec} 秒`; askFit();
@@ -2816,9 +2835,10 @@ function askFit(){ const b = $('#subs'); if (stick && !askHold()) b.scrollTop = 
 if (window.ResizeObserver) new ResizeObserver(askFit).observe($('#subs'));
 // 点字幕上的句子（上课中，提示开没开都行）：
 // - 这句之前问过 → 直接显示那次的答案，不重新问
-// - 提示没开 → 打开，问这句（前半句没说完的自动连上）
+// - 提示没开 → 双击才打开，问这句（前半句没说完的自动连上）
 // - 提示开着：点选中部分两头是去掉；紧挨着、而且接缝处没说完（不是句号问号结尾）是加上去；别的是换成那句
 //   停手 0.8 秒再问。只是调整选中范围、或者"提示"按钮自动选错了（1 分钟内、没收藏）才替换刚才那条，换成别的问题就是新的一条
+let tapLine = 0, tapAt = 0;
 $('#subs').addEventListener('click', e => {
   if (L.state === 'idle' && !ASK.open) return;
   const el = e.target.closest('.line'); if (!el) return;
@@ -2826,6 +2846,11 @@ $('#subs').addEventListener('click', e => {
   if (!PROVIDERS.some(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim())){ toast('先在设置里填翻译用的 key'); return; }
   const old = qaOf(l);
   if (!ASK.open){
+    // 提示没开时要双击（0.4 秒内点同一句两下）才问，单击不理，免得看字幕时误触
+    const now = Date.now(), dbl = tapLine === l.id && now - tapAt < 400;
+    tapLine = l.id; tapAt = now;
+    if (!dbl) return;
+    tapLine = 0;
     askOpen(true);
     if (old){ showRec(old); return; }
     ASK.sel = qAround(L.lines.indexOf(l)); ASK.auto = false; showSel(); askNow(false); return;
@@ -3624,7 +3649,7 @@ function fillSettings(){
   $('#curScale').value = S.curScale; $('#curScaleV').textContent = Math.round(S.curScale * 100) + '%'; $('#curColor').value = S.curColor; $('#soundTags').checked = !!S.soundTags; fillTagKinds();
   $('#prefModel').innerHTML = '<option value="">自动（按下面的顺序）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#prefModel').value = S.prefModel || '';
-  $('#askModel').innerHTML = '<option value="">自动（Gemini Flash，不行再换 Groq）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  $('#askModel').innerHTML = '<option value="">自动（gpt-oss · Groq，不行再换别的）</option>' + PROVIDERS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('#askModel').value = S.askModel || '';
   $('#saveDefault').checked = S.saveDefault;
   $('#keepDays').value = S.keepDays;
