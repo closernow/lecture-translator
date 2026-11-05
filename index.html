@@ -2420,7 +2420,7 @@ async function refQuery(q){
       const out = await Promise.race([callProvider(p, RQ_PROMPT, q), new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 2500))]);
       const kw = cleanOut(out).split('\n').map(x => x.trim()).filter(Boolean)[0] || '';
       // 去掉书名（CSA B149.1、Unit 13 这种每段都可能有，只会把不相关的段抬上来）
-      const v = kw.replace(/^(?:search\s*)?keywords?\s*[:：]\s*/i, '').replace(/["“”]/g, '').replace(/(?:CSA\s*)?B149(?:\.\d)?(?:-\d+)?|CSA|Unit\s*\d+/gi, ' ').replace(/(?:\s*,\s*){2,}/g, ', ').replace(/\s+/g, ' ').trim().slice(0, 300);
+      const v = kw.replace(/^(?:search\s*)?keywords?\s*[:：]\s*/i, '').replace(/["“”]/g, '').replace(/\b(?:CSA\s*)?B149(?:\.\d)?(?:-\d+)?\b|\bCSA\b|\bUnit\s*\d+\b/gi, ' ').replace(/(?:\s*,\s*){2,}/g, ', ').replace(/\s+/g, ' ').trim().slice(0, 300);
       RQ.set(q, v); return v;
     } catch(e){ log(`换书上说法失败 ${p.name}：${errWhy(e)}`); if (e.status) coolDown(p, e); return ''; }
   }
