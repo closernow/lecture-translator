@@ -2375,6 +2375,7 @@ function refTok(s){
 function refBuild(){
   const docs = [], post = new Map(); let tot = 0;
   for (const b of REF.books) for (const c of b.chunks || []){
+    if (/^Assignment Questions/i.test(c.s || '')) continue;   // 课本的课后练习题只有选项没答案，带给 AI 会被带偏（实测从选项里挑了个错的）
     const i = docs.length, toks = refTok(c.h + ' ' + c.t);
     docs.push({b:b.id, c, n:toks.length}); tot += toks.length;
     const tf = new Map(); toks.forEach(w => tf.set(w, (tf.get(w) || 0) + 1));
@@ -2408,7 +2409,7 @@ function refSearch(q, k = 6){
 }
 // 老师的说法常和书上不一样（window or door ↔ building opening）：先让快模型把问题换成书上的用词，和原话一起搜
 const RQ_PROMPT = `Turn a question from a gas / HVAC class (live speech recognition, may contain errors) into search keywords for the CSA B149.1 / B149.2 codes and the CSA Gas Trade Training Units (textbooks).
-Output ONE line of 5-15 English keywords and short phrases, using the terms those books use, e.g. "window or door" -> "building opening"; "air the furnace needs" -> "air supply combustion air"; "B vent sticking out of the roof" -> "vent termination roof". Keep the main subject words (appliance, part, number). Do NOT include book or standard names (CSA, B149, Unit, code). No explanation.
+Output ONE line of 5-15 English keywords and short phrases, using the terms those books use, e.g. "window or door" -> "building opening"; "air the furnace needs" -> "air supply combustion air"; "B vent sticking out of the roof" -> "vent termination roof"; "flexible gas hose" -> "gas connector". Keep the main subject words (appliance, part, number). Do NOT include book or standard names (CSA, B149, Unit, code). No explanation.
 If it is not a technical question, output "-".`;
 const RQ = new Map();
 async function refQuery(q){
@@ -2646,7 +2647,8 @@ async function streamProvider(p, sys, user, onText, signal){
   }
   const ac = new AbortController(), kill = () => ac.abort();
   signal.addEventListener('abort', kill);
-  let idle = setTimeout(kill, 20000);   // 20 秒没回应就换下一个
+  // 8 秒还没出字就换下一个（实测 Gemini 忙的时候干等 20 秒）；出字以后 15 秒没新字才算断
+  let idle = setTimeout(kill, 8000);
   const headers = p.kind === 'gemini' ? {'Content-Type':'application/json'} : {'Content-Type':'application/json', Authorization:'Bearer ' + key};
   let text = '';
   try {
