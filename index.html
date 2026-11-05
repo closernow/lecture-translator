@@ -467,7 +467,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/4 23:10';
+const APP_VER = '11/4 23:18';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2451,7 +2451,7 @@ const isClause = s => /^(?:[A-O]\.)?\d+(?:\.\d+)*|^(?:Table|Figure|Annex)\b/.tes
 const refLabel = x => isClause(x.s) ? `${x.b} §${x.s}${x.p ? ' · 第 ' + x.p + ' 页' : ''}` : `${x.b}${x.p ? ' 第 ' + x.p + ' 页' : ''}${x.s ? ' · ' + x.s : ''}`;
 // 卡片底部的出处：📖 按钮点开看原文；技术题但没用上资料的标 ⚠
 // 在原文里找 AI 抄出来的那句（QUOTE）：先按原样找（不管大小写、空格、引号），找不到就挑和它重合词最多的一句（≥60% 才标）
-function quoteSpan(t, q){
+function quoteSpan(t, q, min = 0.6){
   if (!t || !q) return null;
   const norm = c => /[‘’]/.test(c) ? "'" : /[“”]/.test(c) ? '"' : /[–—]/.test(c) ? '-' : c.toLowerCase();
   let nt = '', map = [];
@@ -2467,15 +2467,20 @@ function quoteSpan(t, q){
     const sc = hit / qw.size;
     if (sc > bs){ bs = sc; best = [m.index, m.index + m[0].length]; }
   }
-  return bs >= 0.6 ? best : null;
+  return bs >= min ? best : null;
 }
-function srcText(t, q){
-  const sp = quoteSpan(t, q), br = x => esc(x).replace(/\n/g, '<br>');
+// qs：先用这段自己抄的那句；AI 没给这段抄（常见：用了 4 段只抄 1 段），就拿别的段抄的句子找意思最接近的一句（门槛放低到 45%）
+function srcText(t, qs){
+  qs = [...new Set(qs.filter(Boolean))];
+  let sp = null;
+  for (const q of qs) if ((sp = quoteSpan(t, q))) break;
+  if (!sp) for (const q of qs.slice(1)) if ((sp = quoteSpan(t, q, 0.45))) break;
+  const br = x => esc(x).replace(/\n/g, '<br>');
   return sp ? br(t.slice(0, sp[0])) + '<mark class="qhl">' + br(t.slice(sp[0], sp[1])) + '</mark>' + br(t.slice(sp[1])) : br(t);
 }
 function srcHtml(rec){
   if (!rec) return '';
-  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(refLabel(x))}</b>${x.h && x.h !== x.s ? ' · ' + esc(x.h) : ''}<br>${srcText(x.t || '', x.q || rec.quote)}</div>`).join('') + '</div>';
+  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(refLabel(x))}</b>${x.h && x.h !== x.s ? ' · ' + esc(x.h) : ''}<br>${srcText(x.t || '', [x.q, rec.quote].concat(rec.src.map(y => y.q)))}</div>`).join('') + '</div>';
   if (rec.nosrc) return '<div class="srcs"><span class="nosrc">⚠ 没查到出处</span></div>';
   return '';
 }
@@ -2597,7 +2602,7 @@ Book excerpts: if "Book excerpts" (CSA B149 codes and the CSA Gas Trade Training
  Read the excerpt carefully and use the item that matches exactly what was asked (e.g. "a window or door that can be opened" and "a mechanical air-supply inlet" are different items with different distances). If the code value depends on a condition (appliance input in Btu/h, appliance type, natural gas vs propane), SHORT must give the values by condition, briefly, e.g. "6 in / 12 in / 3 ft by input".
 Write exactly these lines: SHORT: / 中文： / DETAIL: as above, then two last lines:
 REF: <situation A: the numbers of the book excerpts you actually used, e.g. "1, 3"; "none" if no excerpts were given or none of them support the answer. Situation B or C: "-">
-QUOTE: <if REF has numbers: for EACH excerpt number in REF, write "[n] " and then copy word for word, exactly as written in that excerpt, the one sentence or list item (max 40 words) that states the answer; separate them with " | ", e.g. "[1] ... | [3] ...". Otherwise "-">
+QUOTE: <if REF has numbers: for EACH excerpt number in REF, write "[n] " and then copy word for word, exactly as written in that excerpt, the one sentence or list item (max 40 words) that states the answer; separate them with " | ", e.g. "[1] ... | [3] ...". Every number listed in REF must get its own [n] quote. Otherwise "-">
 No other text, no markdown.`;
 // 开始前选的课程（只是参考，模型每次自己按前 30 句判断场合）
 const COURSES = [
@@ -2883,7 +2888,7 @@ if (window.ResizeObserver) new ResizeObserver(askFit).observe($('#subs'));
 // - 提示没开 → 双击才打开，问这句（前半句没说完的自动连上）
 // - 提示开着：点选中部分两头是去掉；点别的句子一律换成问它所在的问题（不再和刚才的连在一起，以前猜"要不要连"常猜错）
 //   问题没选全（拖了三行）就点卡片上的"＋上一句""＋下一句"
-//   停手 0.8 秒再问。只是调整选中范围、或者"提示"按钮自动选错了（1 分钟内、没收藏）才替换刚才那条，换成别的问题就是新的一条
+//   停手 0.8 秒再问。只有调整选中范围才替换刚才那条，换成别的问题就是新的一条
 let tapLine = 0, tapAt = 0;
 $('#subs').addEventListener('click', e => {
   if (L.state === 'idle' && !ASK.open) return;
@@ -2908,9 +2913,10 @@ $('#subs').addEventListener('click', e => {
   else { ASK.sel = qAround(k); adjust = false; }
   selAsk(adjust);
 });
-// 选中范围变了：停手 0.8 秒再问。调整范围、或"提示"按钮自动选错的那条（1 分钟内、没收藏）替换刚才那条，别的是新的一条
+// 选中范围变了：停手 0.8 秒再问。只有调整范围才替换刚才那条，别的是新的一条
 function selAsk(adjust){
-  const r = ASK.last, replace = adjust || !!(r && r.auto && !r.star && Date.now() - (r.at || 0) < 60000);
+  // 只有调整范围才替换刚才那条；换成别的问题一律是新的一条（以前"提示按钮自动选的 1 分钟内换题就替换"，把选对了的答案也顶掉了，点回去只能重问）
+  const replace = adjust;
   ASK.auto = false; showSel();
   if (ASK.ac) ASK.ac.abort();
   $('#askAns').innerHTML = '<div class="azh">选好了就停手，马上问…</div>'; $('#askMeta').textContent = ''; $('#askAgain').innerHTML = '';
