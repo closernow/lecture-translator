@@ -128,6 +128,26 @@ a{color:#7fb7ff}
 /* 手机竖屏上课时按钮多（暂停、结束、提示、识别方式），挤一挤；"保存"上课中本来就改不了，先藏起来 */
 @media (max-width:430px){ #bottom{gap:6px;padding-left:10px;padding-right:10px} #bottom .big{padding:12px 11px;font-size:16px} #bottom.run #togSaveL{display:none} #bottom.run .mic{padding:10px 8px} }
 
+/* 资料：查书按钮有资料才显示；手机上顶栏挤，有查书时藏掉标题 */
+#btnBook{display:none}
+body.hasRef #btnBook{display:inline-block}
+#top button{white-space:nowrap}
+@media (max-width:430px){ body.hasRef #top .title{display:none} }
+.bookq{padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.bookq input{width:100%;box-sizing:border-box;font-size:16px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+.refc{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;background:var(--panel)}
+.refh{font-weight:600;font-size:14px;margin-bottom:6px}
+.reft{font-size:15px;line-height:1.55}
+.reft mark{background:#5a4a12;color:inherit;border-radius:3px;padding:0 1px}
+.muted{color:var(--muted);font-weight:normal}
+.row.refrow{flex-wrap:nowrap}
+.refrow > span:first-child{flex:1;min-width:0}
+.srcs{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start}
+.srcb{font-size:13px;padding:4px 8px;border-radius:8px;color:#9fc6ff}
+.srct{display:none;flex-basis:100%;font-size:13px;line-height:1.5;color:var(--muted);border-left:3px solid #3a5a8a;padding:4px 8px;max-height:40vh;overflow-y:auto}
+.srct.show{display:block}
+.nosrc{font-size:12px;color:#d8a24a}
+
 /* panels */
 .panel{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;z-index:10}
 .panel.show{display:flex}
@@ -191,6 +211,7 @@ a{color:#7fb7ff}
   <span id="level"><i></i></span>
   <span id="vadTag"></span>
   <span id="prov"></span>
+  <button id="btnBook">查书</button>
   <button id="btnHistory">历史</button>
   <button id="btnSettings">设置</button>
 </div>
@@ -227,6 +248,13 @@ a{color:#7fb7ff}
     <button id="selDel" class="danger" disabled>删除</button>
   </div>
   <div class="body" id="histList"></div>
+</div>
+
+<!-- 查书：直接搜规范原文 -->
+<div class="panel" id="pBook">
+  <header><button data-close>返回</button><h2>查书</h2></header>
+  <div class="bookq"><input id="bookQ" type="search" placeholder="英文关键词或条款号，如 vent flat roof、8.14.2" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+  <div class="body" id="bookList"></div>
 </div>
 
 <!-- session detail -->
@@ -312,6 +340,13 @@ a{color:#7fb7ff}
       <div class="hint">上课点"提示"时先用它。默认 Gemini Flash（要填 Gemini 的 key），答 HVAC 比较准，会先想一下再答；没 key 或被限流就按顺序换 Groq 的。翻译不受影响，还是用上面的。</div>
       <div id="provList"></div>
       <div class="hint">模型名一般不用改。哪家改了模型名或下线了，在这里改成新名字。</div>
+    </div>
+
+    <div class="sec">
+      <h3>资料（规范原文）</h3>
+      <div class="hint">导入在电脑上做好的资料文件（比如 B149.json.gz）。只存在这台设备和你自己 Google Drive 的隐藏数据里（不公开），开了云同步，别的设备同步一次就自动下载。上课点"提示"时自动查，有相关条款就照原文回答并标出处；顶上"查书"可以直接搜原文。</div>
+      <div id="refList"></div>
+      <div class="row"><button id="btnRefImp">导入资料</button><input type="file" id="refFile" accept=".gz,.json,application/json,application/gzip,application/x-gzip" style="display:none"></div>
     </div>
 
     <div class="sec">
@@ -1998,6 +2033,8 @@ const Cloud = {
       await this.upload(sf && sf.id, 'settings.json', Object.fromEntries(SYNC_KEYS.map(k => [k, S[k]])), S.updatedAt);
     }
 
+    await refSync(byName, fu);
+
     // 本机删掉的，云端也删：隐藏的同步数据直接删；看得见的文件夹放进 Drive 回收站（还能找回来）
     for (const id of this.del.slice()){
       for (const f of [...byName.values()].filter(f => f.name === 'session-' + id + '.json' || f.name.startsWith('audio-' + id + '-'))){
@@ -2288,6 +2325,192 @@ function showJump(n){ const j = $('#jump'); j.style.display = stick ? 'none' : '
 function toLatest(){ const b = $('#subs'); setStick(true); b.scrollTop = b.scrollHeight; }
 $('#jump').onclick = toLatest;
 
+/* ================= 资料（规范原文：查书、提示查出处） ================= */
+// 资料文件在电脑上用 资料/build_refs.py 生成（有版权，不进仓库），设置里"导入资料"选它（.json 或 .json.gz）
+// 存本机 IndexedDB（单独的库 lt-refs，不动录音那个库），并传到 Drive 隐藏数据 ref-<书id>.json；别的设备同步时下载存本机，上课不用再下
+// 格式：{kind:'lt-ref', v:1, books:[{id:'B149.1', name, chunks:[{s:条款号, h:小节标题, p:页码, t:原文}]}]}，以后加书（Gas Technician 模块等）照这个格式
+const RefDB = {
+  db:null,
+  open(){
+    if (this.db) return Promise.resolve(this.db);
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('lt-refs', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('books', {keyPath:'id'});
+      r.onsuccess = () => { this.db = r.result; res(this.db); };
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async run(mode, fn){
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const t = db.transaction('books', mode); let out;
+      const r = fn(t.objectStore('books'));
+      if (r) r.onsuccess = () => { out = r.result; };
+      t.oncomplete = () => res(out); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+    });
+  },
+  all(){ return this.run('readonly', st => st.getAll()); },
+  put(b){ return this.run('readwrite', st => st.put(b)); },
+  del(id){ return this.run('readwrite', st => st.delete(id)); },
+};
+const REF = {books:[], docs:[], post:new Map(), avgLen:1, del:[]};
+try { REF.del = JSON.parse(localStorage.getItem('lt.refDel') || '[]'); } catch(e){}
+const refDelSave = () => { try { localStorage.setItem('lt.refDel', JSON.stringify(REF.del)); } catch(e){} };
+const REF_STOP = new Set(('the a an of and or to in on for with by at as is are be shall not no if it its this that from into than then any all such other which when where who what how why do does did can could should would will may must there their these those you your we our me my he she they them was were has have had been being about over under up down out also only per each more most less least very just so but use used using see clause table figure annex accordance required').split(' '));
+// 分词：英文词（去复数）和数字/条款号（8.14.2）
+function refTok(s){
+  const out = [];
+  for (let w of String(s || '').toLowerCase().match(/[a-z]+|\d+(?:\.\d+)*/g) || []){
+    if (/^[a-z]/.test(w)){
+      if (w.length < 2 || REF_STOP.has(w)) continue;
+      if (w.length > 4 && w.endsWith('ies')) w = w.slice(0, -3) + 'y';
+      else if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) w = w.slice(0, -1);
+    }
+    out.push(w);
+  }
+  return out;
+}
+function refBuild(){
+  const docs = [], post = new Map(); let tot = 0;
+  for (const b of REF.books) for (const c of b.chunks || []){
+    const i = docs.length, toks = refTok(c.h + ' ' + c.t);
+    docs.push({b:b.id, c, n:toks.length}); tot += toks.length;
+    const tf = new Map(); toks.forEach(w => tf.set(w, (tf.get(w) || 0) + 1));
+    tf.forEach((f, w) => { let a = post.get(w); if (!a) post.set(w, a = []); a.push(i, f); });
+  }
+  Object.assign(REF, {docs, post, avgLen:tot / Math.max(1, docs.length)});
+}
+async function refLoad(){
+  try { REF.books = ((await RefDB.all()) || []).sort((a, b) => a.id.localeCompare(b.id)); }
+  catch(e){ REF.books = []; log('资料读不出来：' + e.message); }
+  refBuild(); refUI();
+}
+// BM25 打分；问题里直接写了条款号（8.14.2）的，那段加分
+function refSearch(q, k = 6){
+  const N = REF.docs.length; if (!N) return [];
+  const qs = [...new Set(refTok(q))], sc = new Float64Array(N), hit = new Uint8Array(N);
+  const k1 = 1.2, bb = 0.75;
+  for (const w of qs){
+    const a = REF.post.get(w); if (!a) continue;
+    const df = a.length / 2, idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
+    for (let j = 0; j < a.length; j += 2){
+      const i = a[j], f = a[j + 1];
+      sc[i] += idf * f * (k1 + 1) / (f + k1 * (1 - bb + bb * REF.docs[i].n / REF.avgLen)); hit[i]++;
+    }
+  }
+  const cls = qs.filter(w => /^\d+\.\d+/.test(w));
+  if (cls.length) REF.docs.forEach((d, i) => { if (String(d.c.s).split('–').some(x => cls.some(w => x === w || x.startsWith(w + '.')))) { sc[i] += 10; hit[i]++; } });
+  const idx = []; for (let i = 0; i < N; i++) if (sc[i] > 0) idx.push(i);
+  idx.sort((x, y) => sc[y] - sc[x]);
+  return idx.slice(0, k).map(i => ({d:REF.docs[i], score:sc[i], hit:hit[i]}));
+}
+// 提示用：分数够高才带上（不相关的段发过去反而误导），最多 5 段
+const REF_MIN = 7.5;
+function refPick(q){
+  const r = refSearch(q, 8);
+  if (!r.length || r[0].score < REF_MIN || r[0].hit < 2) return [];
+  return r.filter(x => x.score >= Math.max(REF_MIN * 0.7, r[0].score * 0.5) && x.hit >= 2).slice(0, 5);
+}
+const refLabel = x => `${x.b} §${x.s}`;
+// 卡片底部的出处：📖 按钮点开看原文；技术题但没用上资料的标 ⚠
+function srcHtml(rec){
+  if (!rec) return '';
+  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(x.b)} §${esc(x.s)}</b> · ${esc(x.h || '')}${x.p ? ' · 第 ' + x.p + ' 页' : ''}<br>${esc(x.t || '').replace(/\n/g, '<br>')}</div>`).join('') + '</div>';
+  if (rec.nosrc) return '<div class="srcs"><span class="nosrc">⚠ 没查到出处</span></div>';
+  return '';
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('.srcb'); if (!b) return;
+  e.stopPropagation();
+  const t = b.nextElementSibling; if (t) t.classList.toggle('show');
+}, true);
+async function refImport(file){
+  let buf = new Uint8Array(await file.arrayBuffer());
+  if (buf[0] === 0x1f && buf[1] === 0x8b){
+    if (!window.DecompressionStream) throw new Error('这个浏览器解不开压缩文件（.gz），换新一点的浏览器，或导入没压缩的 .json');
+    buf = new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+  }
+  let j; try { j = JSON.parse(new TextDecoder().decode(buf)); } catch(e){ throw new Error('文件格式不对'); }
+  if (!j || j.kind !== 'lt-ref' || !Array.isArray(j.books)) throw new Error('这不是课堂同传的资料文件');
+  const u = Date.now(), ids = [];
+  for (const b of j.books){
+    if (!b || !b.id || !Array.isArray(b.chunks)) continue;
+    await RefDB.put({id:String(b.id), name:b.name || b.id, u, chunks:b.chunks}); ids.push(b.id);
+    REF.del = REF.del.filter(x => x !== b.id);
+  }
+  refDelSave(); await refLoad(); Cloud.schedule(1000);
+  log('导入资料：' + ids.join('、'));
+  return ids;
+}
+async function refRemove(id){
+  await RefDB.del(id);
+  if (!REF.del.includes(id)) REF.del.push(id);
+  refDelSave(); await refLoad(); Cloud.schedule(1000);
+}
+// 云同步：ref-<书id>.json，谁新用谁的；本机删掉的云端也删；上传过的书云端没了（别的设备删了）本机也删
+async function refSync(byName, fu){
+  for (const id of REF.del.slice()){
+    const f = byName.get('ref-' + id + '.json');
+    if (f){ try { await Cloud.api('DELETE', 'https://www.googleapis.com/drive/v3/files/' + f.id); } catch(e){ if (e.status !== 404) throw e; } byName.delete(f.name); }
+    REF.del = REF.del.filter(x => x !== id); refDelSave();
+  }
+  let changed = false;
+  const local = new Map(REF.books.map(b => [b.id, b]));
+  for (const f of byName.values()){
+    const m = f.name.match(/^ref-(.+)\.json$/); if (!m) continue;
+    const b = local.get(m[1]);
+    if (!b || fu(f) > (b.u || 0)){
+      const r = await Cloud.download(f.id);
+      if (r && Array.isArray(r.chunks)){ await RefDB.put({id:m[1], name:r.name || m[1], u:fu(f), cloud:true, chunks:r.chunks}); changed = true; log('资料已从云端下载：' + m[1]); }
+    }
+  }
+  for (const b of REF.books){
+    const f = byName.get('ref-' + b.id + '.json');
+    if (!f && b.cloud){ await RefDB.del(b.id); changed = true; log('资料在别的设备上删了，本机也删：' + b.id); continue; }
+    if (!f || (b.u || 0) > fu(f)){
+      await Cloud.upload(f && f.id, 'ref-' + b.id + '.json', {id:b.id, name:b.name, chunks:b.chunks}, b.u || Date.now());
+      if (!b.cloud){ b.cloud = true; await RefDB.put(b); }
+      log('资料已传到云端：' + b.id);
+    }
+  }
+  if (changed) await refLoad();
+}
+// 设置里的资料列表；顶上"查书"按钮有资料才显示
+function refUI(){
+  document.body.classList.toggle('hasRef', REF.books.length > 0);
+  const box = $('#refList'); if (!box) return;
+  box.innerHTML = REF.books.length ? REF.books.map(b => `<div class="row refrow"><span>📖 ${esc(b.name)}<span class="muted"> · ${(b.chunks || []).length} 段${b.cloud ? ' · 已同步' : ''}</span></span><button data-refdel="${esc(b.id)}">删除</button></div>`).join('')
+    : '<div class="hint">还没有导入资料</div>';
+}
+$('#btnRefImp').onclick = () => $('#refFile').click();
+$('#refFile').onchange = async () => {
+  const f = $('#refFile').files[0]; $('#refFile').value = ''; if (!f) return;
+  toast('导入中…');
+  try { const ids = await refImport(f); toast('导入好了：' + ids.join('、') + (Cloud.st.on ? '，会传到 Drive，别的设备同步后也能用' : ''), 4000); }
+  catch(e){ toast('导入失败：' + e.message, 5000); }
+};
+$('#refList').addEventListener('click', async e => {
+  const b = e.target.closest('[data-refdel]'); if (!b) return;
+  if (!confirm('删除这本资料？（云同步开着的话其他设备也会删，删了可以重新导入）')) return;
+  await refRemove(b.dataset.refdel); toast('删了');
+});
+// 查书：不用 AI，直接搜原文
+function refHL(t, qs){
+  return String(t).split(/([A-Za-z]+|\d+(?:\.\d+)*)/).map((w, i) => i % 2 && qs.has(refTok(w)[0]) ? `<mark>${esc(w)}</mark>` : esc(w)).join('').replace(/\n/g, '<br>');
+}
+function bookRender(){
+  const q = $('#bookQ').value.trim(), box = $('#bookList');
+  if (!REF.docs.length){ box.innerHTML = '<div class="hint">还没有资料。在电脑上打开这个网页 → 设置 → 资料 → 导入资料。</div>'; return; }
+  if (!q){ box.innerHTML = `<div class="hint">输入英文关键词或条款号，比如 vent flat roof、gas meter clearance、8.14.2。<br>现有资料：${REF.books.map(b => esc(b.name)).join('、')}</div>`; return; }
+  const r = refSearch(q, 20), qs = new Set(refTok(q));
+  box.innerHTML = r.length ? r.map(x => `<div class="refc"><div class="refh">📖 ${esc(refLabel({b:x.d.b, s:x.d.c.s}))}<span class="muted"> · ${esc(x.d.c.h || '')}${x.d.c.p ? ' · 第 ' + x.d.c.p + ' 页' : ''}</span></div><div class="reft">${refHL(x.d.c.t, qs)}</div></div>`).join('')
+    : '<div class="hint">没搜到。换个说法试试（用英文，规范原文是英文）</div>';
+  box.scrollTop = 0;
+}
+let bookTimer = null;
+$('#bookQ').addEventListener('input', () => { clearTimeout(bookTimer); bookTimer = setTimeout(bookRender, 250); });
+$('#btnBook').onclick = () => { openPanel('#pBook'); bookRender(); setTimeout(() => $('#bookQ').focus(), 50); };
+
 /* ================= 问 AI（"提示"，课堂抢答） ================= */
 // 点"提示"：自动选最近一个问题（带问号或 what/why/how 开头，连上被断开的前半句），发给 AI。
 // 答案三层：几个词的短答案（像同学喊出来的那种）、一句中文、"详细"（默认收起，同一次请求一起要回来，点开不用等）
@@ -2308,7 +2531,10 @@ SHORT: <one natural, friendly Canadian English reply the student can say right n
 中文：<what the other person means and their tone, one short sentence in Simplified Chinese>
 DETAIL: <in Simplified Chinese: 2-3 other ways to reply (casual / polite, in English), and explain any slang or idioms they used>
 C) The selected text is not a question (a statement, joke, instruction) -> SHORT = a fitting short reply or the key point; 中文 = what they are saying; DETAIL = more explanation if useful.
-Always exactly three lines starting with SHORT: / 中文： / DETAIL:. No other text, no markdown.`;
+Code excerpts: if "Code excerpts" are given and relevant, base the answer on them; you may cite a clause number only if it appears in those excerpts. They come from a keyword search and may be irrelevant: ignore irrelevant ones.
+Write exactly these lines: SHORT: / 中文： / DETAIL: as above, then one last line:
+REF: <situation A: the numbers of the code excerpts you actually used, e.g. "1, 3"; "none" if no excerpts were given or none of them support the answer. Situation B or C: "-">
+No other text, no markdown.`;
 // 开始前选的课程（只是参考，模型每次自己按前 30 句判断场合）
 const COURSES = [
   {id:'', name:'自动', hint:''},
@@ -2351,12 +2577,12 @@ function askOpen(v){
 // 拆答案：SHORT（老格式叫 EN）、中文、DETAIL（详细）；不按格式来的整段当中文显示
 function parseAns(s){
   s = String(s || '').replace(/<think>[\s\S]*?(<\/think>|$)/g, '').replace(/\*+/g, '').trim();
-  const out = {short:'', zh:'', det:''}; let hit = false;
-  for (const ch of s.split(/\n(?=\s*(?:SHORT|EN|中文|DETAIL|详细)\s*[:：])/i)){
-    const m = ch.match(/^\s*(SHORT|EN|中文|DETAIL|详细)\s*[:：]\s*([\s\S]*)$/i);
+  const out = {short:'', zh:'', det:'', ref:''}; let hit = false;
+  for (const ch of s.split(/\n(?=\s*(?:SHORT|EN|中文|DETAIL|详细|REF)\s*[:：])/i)){
+    const m = ch.match(/^\s*(SHORT|EN|中文|DETAIL|详细|REF)\s*[:：]\s*([\s\S]*)$/i);
     if (!m){ if (!hit) out.zh = ch.trim(); continue; }
     hit = true;
-    const k = /^(short|en)$/i.test(m[1]) ? 'short' : m[1] === '中文' ? 'zh' : 'det';
+    const k = /^(short|en)$/i.test(m[1]) ? 'short' : m[1] === '中文' ? 'zh' : /^ref$/i.test(m[1]) ? 'ref' : 'det';
     out[k] = m[2].trim();
   }
   return out;
@@ -2439,8 +2665,8 @@ async function askStream(sys, user, onText, signal){
   }
   throw lastErr || new Error(isFinite(coolLeft()) ? '模型都在限流冷却中，过一会再试' : '没有可用的模型（检查 key 和开关）');
 }
-function ansShow(s){
-  $('#askAns').innerHTML = answerHtml(s);
+function ansShow(s, rec){
+  $('#askAns').innerHTML = answerHtml(s) + srcHtml(rec);
   if ($('#askBox').classList.contains('det')) $('#askAns').querySelectorAll('.adetb').forEach(x => x.textContent = '收起详细 ▴');
 }
 // 缩成一行 / 展开；答完后一分钟没碰卡片就缩
@@ -2481,17 +2707,24 @@ async function askNow(replace){
   if (cs.hint) u += 'Situation hint (picked by the student before starting; may be wrong): ' + cs.hint + '\n\n';
   if (gl.length) u += 'Glossary (English = Chinese):\n' + gl.map(g => `- ${g.en} = ${g.zh}`).join('\n') + '\n\n';
   if (ctx.length) u += 'Lecture just before (most recent last):\n' + ctx.join('\n') + '\n\n';
+  // 查资料（日常聊天不查）：问题太短就带上前一句
+  const refs = L.course === 'chat' || !REF.docs.length ? [] : refPick(refTok(q).length < 5 && ctx.length ? ctx[ctx.length - 1] + ' ' + q : q);
+  if (refs.length) u += 'Code excerpts (keyword search results; may be irrelevant):\n' + refs.map((r, i) => `[${i + 1}] ${r.d.b} ${r.d.c.s} (${r.d.c.h}): ${r.d.c.t}`).join('\n\n') + '\n\n';
   u += 'Just said / asked (the selected text):\n' + q;
   ans.innerHTML = '<div class="azh">想一下…</div>';
   const t0 = Date.now();
   try {
     const {p, text} = await askStream(ASK_PROMPT, u, s => { if (my === ASK.seq){ ansShow(s); askFit(); } }, ac.signal);
     if (my !== ASK.seq) return;
-    ansShow(text); askFit();
     const sec = ((Date.now() - t0) / 1000).toFixed(1);
     meta.textContent = `${p.name} · ${sec} 秒`; askFit();
-    log(`提示 ${p.name} ${sec}秒`);
     const rec = {t:Math.round(sel[sel.length - 1].t * 100 + 1) / 100, q, a:cleanOut(text).replace(/<think>[\s\S]*$/, '').trim(), m:p.name};
+    // 出处：模型说用了第几段就记那几段（带原文，资料删了也看得到）；技术题没用上资料的标"没查到出处"
+    const ref = parseAns(text).ref, used = [...new Set((ref.match(/\d+/g) || []).map(Number))].map(n => refs[n - 1]).filter(Boolean);
+    if (used.length) rec.src = used.map(r => ({b:r.d.b, s:r.d.c.s, h:r.d.c.h, p:r.d.c.p, t:r.d.c.t}));
+    else if (REF.books.length && !/^\s*-/.test(ref) && L.course !== 'chat') rec.nosrc = true;
+    log(`提示 ${p.name} ${sec}秒，查到 ${refs.length} 段${used.length ? '，用了 ' + used.map(r => refLabel({b:r.d.b, s:r.d.c.s})).join('、') : ''}`);
+    ansShow(text, rec); askFit();
     if (!L.qa) L.qa = [];
     // 点句子改选的，替换刚才那条（问错了的不留，收藏过的星号带过来）；按"提示"按钮问的是新的一条
     const k = prev ? L.qa.indexOf(prev) : -1;
@@ -3205,7 +3438,7 @@ function renderSessLines(){
   // "提示"的问答也按时间插进去（.qa，同样不是 .line）；可以只看提示、只看收藏
   const qa = curSess.qa || [], flt = qa.length ? $('#sessFilter').value : '';
   $('#sessFilter').style.display = qa.length ? '' : 'none';
-  const qaHtml = (x, k) => `<div class="qa${x.star ? ' starred' : ''}" data-q="${k}"><div class="ahead"><div class="aq">${fmtT(x.t)} 提示：${esc(x.q)}</div><button class="star${x.star ? ' on' : ''}" data-star="${k}" aria-label="收藏">${x.star ? '★' : '☆'}</button></div>${answerHtml(x.a)}</div>`;
+  const qaHtml = (x, k) => `<div class="qa${x.star ? ' starred' : ''}" data-q="${k}"><div class="ahead"><div class="aq">${fmtT(x.t)} 提示：${esc(x.q)}</div><button class="star${x.star ? ' on' : ''}" data-star="${k}" aria-label="收藏">${x.star ? '★' : '☆'}</button></div>${answerHtml(x.a)}${srcHtml(x)}</div>`;
   if (flt){
     const list = qa.map((x, k) => ({x, k})).filter(o => flt === 'qa' || o.x.star).sort((a, b) => a.x.t - b.x.t);
     box.innerHTML = list.map(o => qaHtml(o.x, o.k)).join('') || `<div class="hint">${flt === 'star' ? '还没有收藏，点提示卡片上的 ☆' : '这节课没用过提示'}</div>`;
@@ -3266,7 +3499,7 @@ function sessionText(s){
   const items = (s.lines || []).map(l => ({t:l.t, s:`[${fmtT(l.t)}] ${spkName(l.spk) ? spkName(l.spk) + '：' : ''}${lang(lineLang(l))}${plain(l.en)}\n${l.zh || ''}\n`}))
     .concat((s.tags || []).map(g => ({t:g.t, s:`[${fmtT(g.t)}] [${g.tag.replace(/^\S+\s/, '')}]\n`})))   // 声音标记写成 [笑声]
     .concat((s.qa || []).map(x => { const a = parseAns(x.a);
-      return {t:x.t, s:`[${fmtT(x.t)}] 【提示${x.star ? ' ⭐' : ''}】${x.q}\n答：${a.short}\n${a.zh}${a.det ? '\n详细：' + a.det : ''}\n`}; }));
+      return {t:x.t, s:`[${fmtT(x.t)}] 【提示${x.star ? ' ⭐' : ''}】${x.q}\n答：${a.short}\n${a.zh}${a.det ? '\n详细：' + a.det : ''}${x.src && x.src.length ? '\n出处：' + x.src.map(refLabel).join('；') : x.nosrc ? '\n出处：没查到' : ''}\n`}; }));
   return head + items.sort((a, b) => a.t - b.t).map(x => x.s).join('\n');
 }
 $('#btnExportTxt').onclick = () => {
@@ -3422,7 +3655,7 @@ window.addEventListener('beforeunload', e => { if (L.state !== 'idle'){ e.preven
 })();
 
 /* init */
-loadSettings(); lastSyncPart = syncPart(); applyDisplay(); showCourse();
+loadSettings(); lastSyncPart = syncPart(); applyDisplay(); showCourse(); refLoad();
 $('#togSave').checked = S.saveDefault;
 showMicMode();
 updateButtons();
