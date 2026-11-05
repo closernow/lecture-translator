@@ -28,6 +28,7 @@ a{color:#7fb7ff}
 /* top bar */
 #top{display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top) + 8px) 14px 8px;border-bottom:1px solid var(--line);background:var(--panel)}
 #top .title{font-weight:600}
+.ver{font-size:12px;font-weight:normal;color:#8d98a4;margin-left:6px}
 #clock{font-variant-numeric:tabular-nums;color:var(--muted);min-width:64px}
 #level{width:60px;height:6px;background:#2a313a;border-radius:3px;overflow:hidden}
 #level i{display:block;height:100%;width:0;background:var(--accent);transition:width .08s}
@@ -214,7 +215,7 @@ body.hasRef #btnBook{display:inline-block}
 <body>
 
 <div id="top">
-  <span class="title">课堂同传</span>
+  <span class="title">课堂同传<span class="ver"></span></span>
   <span id="clock">00:00</span>
   <span id="level"><i></i></span>
   <span id="vadTag"></span>
@@ -298,7 +299,7 @@ body.hasRef #btnBook{display:inline-block}
 
 <!-- settings -->
 <div class="panel" id="pSettings">
-  <header><button data-close>返回</button><h2>设置</h2></header>
+  <header><button data-close>返回</button><h2>设置 <span class="ver"></span></h2></header>
   <div class="body">
 
     <div class="sec">
@@ -465,6 +466,9 @@ const PROVIDERS = [
   {id:'sf-glm',      name:'GLM-4-9B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'THUDM/GLM-4-9B-0414'},
 ];
 
+// 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
+const APP_VER = '11/4 23:10';
+document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
   asrEngine:'auto', dgModel:'nova-3', asrModel:'whisper-large-v3', micMode:'room', diarize:true, multiLang:false,
@@ -848,7 +852,7 @@ function log(msg){
 function renderLog(){ $('#logBox').textContent = LOG.slice(-150).reverse().join('\n') || '还没有记录'; }
 // 复制全部日志（iPad 上从框里选着复制会串行）；复制不了就存成文件
 async function copyLog(){
-  const text = '== 重要记录（不含翻译、同步），旧的在上 ==\n' + LOG_IMP.join('\n') + '\n\n== 全部记录，旧的在上 ==\n' + LOG.join('\n');
+  const text = '版本 ' + APP_VER + '\n\n== 重要记录（不含翻译、同步），旧的在上 ==\n' + LOG_IMP.join('\n') + '\n\n== 全部记录，旧的在上 ==\n' + LOG.join('\n');
   try { await navigator.clipboard.writeText(text); toast(`已复制 ${LOG_IMP.length + LOG.length} 条，直接粘贴发出去就行`); }
   catch(e){ shareOrDownload(new Blob([text], {type:'text/plain;charset=utf-8'}), '运行日志.txt'); }
 }
