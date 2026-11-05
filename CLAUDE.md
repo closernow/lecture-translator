@@ -168,7 +168,8 @@
 - Deepgram：原账号送了 $200 额度（建议用这个），后来新注册的只有 $50；没绑卡，额度用完会被拒、不扣钱
 - Groq：免费；gpt-oss-120b 是目前主力翻译（0.3–0.8 秒/句）；免费额度**每个模型各算各的**（gpt-oss-120b / gpt-oss-20b / qwen3.8-27b 各 30 RPM、1000 RPD、20 万 TPD），11/2 上课到 11:34 gpt-oss-120b 每天额度用完；Llama 3.3 70B / 3.1 8B 已 404 下架、qwen3-32b 已下架；Kimi K2 已不在 Groq 上；Whisper 逐词时间也用它
 - 不用的：Cerebras（要绑卡才送 $5）、Kimi 开放平台（余额 0 要充值，Tier0 只有 3 RPM）
-- **首选翻译模型** `S.prefModel`（云同步）：选了就先试它，失败照原顺序换
+- **首选翻译模型** `S.prefModel`（云同步）：选了就先试它，失败照原顺序换。**没选（自动）时翻译用 `trOrder()`：gpt-oss-20b 先，gpt-oss-120b 最后，留给"提示"**（11/5 查清：实时翻译约 3 秒一次、每次 500–600 token，40 分钟左右就用光一个模型一天的 20 万 token（Groq 按过去 24 小时滚动算，前一晚测试也占额度），上课 50 分钟时 gpt-oss-120b 已用光，提示只能换 Qwen、答错题。提示每次约 2000–2600 token 输入，一天几十次不是大头。另外 Groq 免费每个模型每分钟 8000 token。试过把发给 AI 的原文精简到相关几句，只省约 12%，没上线）
+- **自动测试**：`资料/eval.js` + `资料/eval_questions.json`（32 题，带标准答案正则和应引用的出处）。和网页同一流程（从 index.html 取提示词和搜索代码），`node 资料/eval.js [模型id,…] [题号,…]`，报告写 `资料/eval_report.md`；`DRY=1` 只算发出去多少 token、不调 AI。key 在 `资料/keys.json`（gitignore，用户 11/5 从 iPad 设置页截图给的 Groq、Gemini key）。跑一遍很耗额度，别在上课前跑
 - **翻译队列**（`runTr`）：离上次请求不到 3 秒就等，攒几句一起翻，积压时一次最多 8 句；所有模型都在冷却时只等不判失败（以前试 4 次约 32 秒就判"翻译失败"，Gemini 一限流歇 1 分钟，每次丢几句中文）；`provErr` 记失败原因，设置页模型列表显示
 - Gemini：免费层，没开结算（别引导用户开 $300 试用）；模型名用 `gemini-flash-lite-latest`，另加 `gemini-flash-latest`、`gemma-3-27b-it`（Gemma 不支持 systemInstruction，`noSys` 拼进用户消息）；**这两个还没用真 key 验证过**；Flash-Lite 免费每分钟十几次，连着翻约 1 分钟就 429；精修时偶尔"额度用完"429。用户有 Gemini Pro 会员，但那是 App 用的，不给 API 加额度
 - 硅基流动：有余额，Qwen3-8B / GLM-4-9B 是免费模型
