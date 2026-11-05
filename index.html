@@ -456,18 +456,16 @@ const PROVIDERS = [
   // -latest 是 Google 自动指向最新版本的名字，旧版本下架也不用改
   // Groq 免费额度每个模型各算各的（每天 20 万 token），主力用完了换同一个 key 下的别的模型
   {id:'groq-qwen',   name:'Qwen 3.8 27B · Groq',  kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'qwen/qwen3.8-27b', extra:{reasoning_effort:'none'}},
-  {id:'groq-oss20',  name:'gpt-oss-20b · Groq',   kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'openai/gpt-oss-20b', extra:{reasoning_effort:'low'}},
+  // 11/5 去掉 gpt-oss-20b（翻译术语硬翻、有意思翻错）和 Gemma 3 27B（模型已下架，Gemma 4 免费层报 500）
   {id:'gemini-lite', name:'Gemini Flash-Lite',    kind:'gemini', keyName:'gemini', model:'gemini-flash-lite-latest'},
   {id:'gemini-flash',name:'Gemini Flash',         kind:'gemini', keyName:'gemini', model:'gemini-flash-latest'},
-  // Gemma 不支持单独的系统指令，说明拼进用户消息里
-  {id:'gemma',       name:'Gemma 3 27B',          kind:'gemini', keyName:'gemini', model:'gemma-3-27b-it', noSys:true},
   // 硅基流动服务器在国内，从加拿大连过去慢，放最后
   {id:'sf-qwen8b',   name:'Qwen3-8B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'Qwen/Qwen3-8B', extra:{enable_thinking:false}},
   {id:'sf-glm',      name:'GLM-4-9B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'THUDM/GLM-4-9B-0414'},
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/5 13:26';
+const APP_VER = '11/5 13:29';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -776,9 +774,9 @@ function coolDown(p, e){
   console.warn(p.name, e);
 }
 
-// 翻译默认顺序：Qwen 先、gpt-oss-20b 次之，其余照 PROVIDERS，gpt-oss-120b 最后
+// 翻译默认顺序：Qwen 先，再 Flash-Lite、硅基流动，gpt-oss-120b 最后；Gemini Flash 不用来翻译（免费每天只有 20 次，留给"换模型再问"）
 // 11/5 用 24 句真实锅炉课字幕对比：Qwen 最快（0.5 秒）、术语对；gpt-oss-20b 把 inducer motor 硬翻成"诱导器电机"、Venturi 不翻、有意思翻错；Flash-Lite 术语最地道但 2.4 秒、免费每分钟次数少，跟不上实时
-const trOrder = () => { const first = ['groq-qwen', 'groq-oss20'].map(id => PROVIDERS.find(p => p.id === id)).filter(Boolean), last = PROVIDERS.filter(p => p.id === 'groq-gptoss'); return first.concat(PROVIDERS.filter(p => !first.includes(p) && !last.includes(p)), last); };
+const trOrder = () => { const first = PROVIDERS.filter(p => p.id === 'groq-qwen'), last = PROVIDERS.filter(p => p.id === 'groq-gptoss'); return first.concat(PROVIDERS.filter(p => !first.includes(p) && !last.includes(p) && p.id !== 'gemini-flash'), last); };
 async function translateWithFallback(sys, user){
   let lastErr = null, tried = 0;
   // 设置里选了首选模型就先试它，其余照原来的顺序
