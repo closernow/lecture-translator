@@ -68,7 +68,7 @@
 | `whisperRange` `whisperFile` `whisperFake` `refineWhisper` `wordsToLines` | 精修里的 Whisper：10 分钟一块、逐词时间、去掉瞎编句 |
 | `openSession` `renderSessLines` `sessionText` | 历史记录详情页、导出文字格式 |
 | `setMicMode` `showMicMode` `#btnMic` | 收音模式（主界面"全场/近处"按钮） |
-| `/* === 资料` `RefDB` `REF` `refTok` `refBuild` `refSearch` `refPick` `REF_MIN` `srcHtml` `refImport` `refSync` `refUI` `bookRender` `#pBook` `#btnBook` | 规范原文资料：导入、存本机（单独的 IndexedDB `lt-refs`）、Drive 同步、BM25 搜索、提示卡片出处、"查书"面板 |
+| `/* === 资料` `RefDB` `REF` `refTok` `refBuild` `refSearch` `refPick` `REF_MIN` `srcHtml` `refImport` `refSync` `refUI` `bookRender` `#pBook` `#btnBook` `isClause` `refLabel` `refQuery` `RQ_PROMPT` | 规范和课本资料：先换书上说法再搜、导入、存本机（单独的 IndexedDB `lt-refs`）、Drive 同步、BM25 搜索、提示卡片出处、"查书"面板 |
 | `/* === 问 AI` `ASK` `ASK_PROMPT` `COURSES` `courseOf` `showCourse` `#btnCourse` `pickQuestion` `askNow` `askStream` `streamProvider` `parseAns` `answerHtml` `askMini` `starShow` `#askBox` `#sessFilter` | 上课点"提示"抢答：自动选最近的问题、流式回答、三层答案、收藏、缩成一行；问答存 `session.qa` |
 
 ## 踩过的坑和定下的做法（别改回去）
@@ -121,10 +121,14 @@
 - 不查教材、不上网搜（教材不能进公开仓库）；以后要做就放本机或 Drive 隐藏数据
 
 ### 资料：提示查原文、查书（11/4 做的，还没在课上用过）
-- **资料文件**在电脑上生成：`资料/build_refs.py`（`资料/` 整个 gitignore，原文有版权绝不能提交）→ `资料/B149.json.gz`（约 180KB）和 `资料/B149.preview.txt`（看切得对不对）。格式 `{kind:'lt-ref', v:1, books:[{id, name, chunks:[{s:条款号, h:小节标题, p:印刷页码, t:原文}]}]}`，以后加书（Gas Technician Module 1–9 在 `D:\范莎学院\第一学期\modules\`，第三学期各课 module）在脚本里加一个函数返回同样格式就行；导入时按书 id 覆盖
-- 来源：B149.1 用 `D:\范莎学院\B149.1清洗版本\clean_output.txt`（`Cleaned_B149.pdf` 本身的文字层是乱码，这个 txt 是之前解出来的干净版，407 页，按 `--- 第N页 ---` 分页；印刷页码 = PDF 页 - 6）；B149.2 直接读 `D:\范莎学院\B149.2-15 (CSA) (Z-Library).pdf`（没乱码，印刷页码 = PDF 页 - 16）。切法：条款号单独一行（`8.14.2`，章号 1–20 或附录字母）开新单元，同一小节的短条款合并到 450 字以上、最多 1300 字；表格（字母占比 <45%）只留开头 240 字；去掉页眉和授权人那行
-- 设置"资料（规范原文）"：导入资料（.json 或 .json.gz，gz 用 `DecompressionStream` 解）→ 存 IndexedDB `lt-refs`（单独的库，不动录音那个库的版本号）→ 云同步传到 Drive 隐藏数据 `ref-<书id>.json`（`appProperties.u`，谁新用谁的）；别的设备同步时下载存本机；本机删的云端也删（`lt.refDel`），上传过的书（`cloud:true`）云端没了本机也删
-- **提示查资料**（`refPick`）：BM25（英文去停用词、去复数；问题里有条款号的那段加 10 分），最高分 ≥ `REF_MIN`（7.5）且命中 ≥2 个词才带，取 ≥ max(5.25, 最高分一半) 的前 5 段；问题少于 5 个词就带上前一句一起搜；"日常聊天"不查。发给模型时标 `[1] B149.1 8.14.2 (小节): 原文`，要求最后一行 `REF: 1, 3` / `none` / `-`（闲聊、不是问题）。用到的段连原文存进 `rec.src`，技术题没用上（`none`）且有资料时 `rec.nosrc` → 卡片底部"📖 B149.1 §8.14.2"（点开看原文）或"⚠ 没查到出处"；历史记录卡片、导出（`出处：…`）都带
+- **资料文件**在电脑上生成：`资料/build_refs.py`（`资料/` 整个 gitignore，原文有版权绝不能提交）→ `资料/资料.json.gz`（B149.1、B149.2、Unit 13/15/18/20/21 共 7 本）和 `资料/资料.preview.txt`（看切得对不对）。格式 `{kind:'lt-ref', v:1, books:[{id, name, chunks:[{s:条款号或小标题, h:章节标题, p:印刷页码, t:原文}]}]}`，以后加书在脚本里加一个函数返回同样格式就行；导入时按书 id 覆盖
+- **B149.1 来源**：`D:\范莎学院\CSA-B149.1-20.pdf` 的文字层是乱码（Calibri/Cambria 用 Identity-H 但没有 ToUnicode，抽出来的是字形编号）。`资料/decode_b149_1.py` 用 PyMuPDF `get_texttrace()` 拿真字形编号，按 Windows 自带同名字体（fontTools）反查成字母 → `资料/B149.1_clean.txt`（按 `--- 第N页 ---` 分页，印刷页码 = PDF 页 - 6）。比以前的 `clean_output.txt` 准（分数 1/2、Btu/h、Québec 都对了）。`资料/fix_pdf_tounicode.py` 给原 PDF 补 ToUnicode 做成能搜能复制、外观不变的 `D:\范莎学院\B149.1清洗版本\CSA-B149.1-20_可搜索版.pdf`，`资料/remove_license.py` 再删掉每页 Courier 字体的购买人小字（只删显示文字的指令，不按区域涂，封面 "REVISED MAY 2021" 叠在一起）
+- **B149.2**：直接读 `D:\范莎学院\B149.2-15 (CSA) (Z-Library).pdf`（没乱码，印刷页码 = PDF 页 - 16）。规范的切法：条款号单独一行（`8.14.2`，章号 1–20 或附录字母）开新单元，同一小节的短条款合并到 450 字以上、最多 1300 字；表格（字母占比 <45%）只留开头 240 字；去掉页眉和授权人那行
+- **Unit 课本**（扫描版，PDF 没文字层）：Unit 18/20 用 1084 精读练习现成的 Tesseract OCR（`1084/精读练习源文件/课本文字/UnitXX_OCR.txt`，`######## PAGE n` 已是印刷页码）；Unit 13/15/21 用 `资料/ocr_unit.py`（RapidOCR，scratchpad 里建 venv 装 `rapidocr-onnxruntime pymupdf`，200dpi，单本一页约 5 秒）→ `资料/UnitXX_OCR.txt`，`######## PDF n` 是从 0 数的 PDF 页，**印刷页码 = PDF 页（从 0 数）- 4，Unit 15 是 - 2**（每本先看几页页脚的页码核对）。3004 文件夹里的 `Unit13教材OCR重排版.pdf` 很多词连在一起（thermocoupleisverysmall），搜不到，不用。课本切法：按章（`1. Water heaters`）和小标题切，一段 ≤900 字左右、超过 1300 切开，`s` 是小标题、`h` 是章；去掉页眉页脚、目录页；常见英文词（拿 B149 原文当词表）占比 <55% 的段当 OCR 乱码扔掉
+- 出处标签 `refLabel`：规范 `B149.1 §8.14.2 · 第 130 页`，课本 `Unit 20 第 67 页 · Low water cut-off`（`isClause` 判断 s 是不是条款号）；卡片上直接显示，不用点开才看到页码
+- 设置"资料（规范和课本）"：导入资料（.json 或 .json.gz，gz 用 `DecompressionStream` 解）→ 存 IndexedDB `lt-refs`（单独的库，不动录音那个库的版本号）→ 云同步传到 Drive 隐藏数据 `ref-<书id>.json`（`appProperties.u`，谁新用谁的）；别的设备同步时下载存本机；本机删的云端也删（`lt.refDel`），上传过的书（`cloud:true`）云端没了本机也删
+- **先换成书上的说法再搜**（`refQuery` `RQ_PROMPT`）：老师的说法常和书上不一样（window or door ↔ building opening、furnace 要多少 air ↔ air supply），点"提示"后先用翻译那套模型（首选 `S.prefModel`，非流式 `callProvider`）把问题换成 5–15 个书上用的英文关键词，只试一个模型、最多等 2.5 秒，失败就只用原话搜；结果按问题缓存（`RQ`）。搜的是"原话 + 关键词"。卡片先显示"查书…"。实测：原话 furnace 小房间要多少空气找错，加关键词后找到 B149.1 8.2.6；expansion tank、low water cut-off 等课本题都排得更准
+- **提示查资料**（`refPick`）：BM25（英文去停用词、去复数；带连字符的词同时算连写和分开，cut-off/cutoff/cut off 都对得上；问题里有条款号的那段加 10 分），最高分 ≥ `REF_MIN`（7.5）且命中 ≥2 个词才带，取 ≥ max(5.25, 最高分一半) 的前 5 段；问题少于 5 个词就带上前一句一起搜；"日常聊天"不查。发给模型时叫 "Book excerpts"，标 `[1] B149.1 §8.14.2 · 第 130 页 (小节): 原文`，要求最后一行 `REF: 1, 3` / `none` / `-`（闲聊、不是问题）。用到的段连原文存进 `rec.src`，技术题没用上（`none`）且有资料时 `rec.nosrc` → 卡片底部"📖 B149.1 §8.14.2 · 第 130 页"（点开看原文）或"⚠ 没查到出处"；历史记录卡片、导出（`出处：…`）都带
 - 实测分数（用真资料）：平屋顶排气管高度 16、调压器排气口离开口 15.5、试压 11.7、draft hood 10.3、燃气表离窗 8.4；TXV 充注 6.1（只命中 1 个词，不带）、闲聊和 superheat 0
 - **查书**（顶上"查书"，有资料才显示；手机窄屏有它时藏掉"课堂同传"标题）：不用 AI，输入就搜（250ms），列前 20 段，关键词黄色高亮
 - 测试时注意：预览里 `localhost:8010` 的 `lecture-translator` 库曾经卡死（open/delete 都没回应，换标签页也一样），换 `http://127.0.0.1:8010/`（不同源、新库）测就好

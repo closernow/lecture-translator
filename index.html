@@ -253,7 +253,7 @@ body.hasRef #btnBook{display:inline-block}
 <!-- 查书：直接搜规范原文 -->
 <div class="panel" id="pBook">
   <header><button data-close>返回</button><h2>查书</h2></header>
-  <div class="bookq"><input id="bookQ" type="search" placeholder="英文关键词或条款号，如 vent flat roof、8.14.2" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+  <div class="bookq"><input id="bookQ" type="search" placeholder="英文关键词或条款号，如 vent flat roof、thermocouple、8.14.2" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
   <div class="body" id="bookList"></div>
 </div>
 
@@ -343,8 +343,8 @@ body.hasRef #btnBook{display:inline-block}
     </div>
 
     <div class="sec">
-      <h3>资料（规范原文）</h3>
-      <div class="hint">导入在电脑上做好的资料文件（比如 B149.json.gz）。只存在这台设备和你自己 Google Drive 的隐藏数据里（不公开），开了云同步，别的设备同步一次就自动下载。上课点"提示"时自动查，有相关条款就照原文回答并标出处；顶上"查书"可以直接搜原文。</div>
+      <h3>资料（规范和课本）</h3>
+      <div class="hint">导入在电脑上做好的资料文件（比如 资料.json.gz，含 B149 和这学期的 Unit 课本）。只存在这台设备和你自己 Google Drive 的隐藏数据里（不公开），开了云同步，别的设备同步一次就自动下载。上课点"提示"时自动查，有相关条款就照原文回答并标出处；顶上"查书"可以直接搜原文。</div>
       <div id="refList"></div>
       <div class="row"><button id="btnRefImp">导入资料</button><input type="file" id="refFile" accept=".gz,.json,application/json,application/gzip,application/x-gzip" style="display:none"></div>
     </div>
@@ -2360,7 +2360,9 @@ const REF_STOP = new Set(('the a an of and or to in on for with by at as is are 
 // 分词：英文词（去复数）和数字/条款号（8.14.2）
 function refTok(s){
   const out = [];
-  for (let w of String(s || '').toLowerCase().match(/[a-z]+|\d+(?:\.\d+)*/g) || []){
+  // cut-off / cutoff / cut off 都要对得上：带连字符的词同时算连写和分开
+  s = String(s || '').toLowerCase().replace(/([a-z]+)-([a-z]+)/g, '$1$2 $1 $2');
+  for (let w of s.match(/[a-z]+|\d+(?:\.\d+)*/g) || []){
     if (/^[a-z]/.test(w)){
       if (w.length < 2 || REF_STOP.has(w)) continue;
       if (w.length > 4 && w.endsWith('ies')) w = w.slice(0, -3) + 'y';
@@ -2404,18 +2406,38 @@ function refSearch(q, k = 6){
   idx.sort((x, y) => sc[y] - sc[x]);
   return idx.slice(0, k).map(i => ({d:REF.docs[i], score:sc[i], hit:hit[i]}));
 }
+// 老师的说法常和书上不一样（window or door ↔ building opening）：先让快模型把问题换成书上的用词，和原话一起搜
+const RQ_PROMPT = `Turn a question from a gas / HVAC class (live speech recognition, may contain errors) into search keywords for the CSA B149.1 / B149.2 codes and the CSA Gas Trade Training Units (textbooks).
+Output ONE line of 5-15 English keywords and short phrases, using the terms those books use, e.g. "window or door" -> "building opening"; "air the furnace needs" -> "air supply combustion air"; "B vent sticking out of the roof" -> "vent termination roof". Keep the main subject words (appliance, part, number). No explanation.
+If it is not a technical question, output "-".`;
+const RQ = new Map();
+async function refQuery(q){
+  if (RQ.has(q)) return RQ.get(q);
+  const order = PROVIDERS.filter(p => p.id === S.prefModel).concat(PROVIDERS.filter(p => p.id !== S.prefModel));
+  for (const p of order){
+    if (!S.enabled[p.id] || !(S.keys[p.keyName] || '').trim() || (cooldown[p.id] || 0) > Date.now()) continue;
+    try {   // 只试一个、最多等 2.5 秒：慢了就只用原话搜，不耽误出答案
+      const out = await Promise.race([callProvider(p, RQ_PROMPT, q), new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 2500))]);
+      const kw = cleanOut(out).split('\n').map(x => x.trim()).filter(Boolean)[0] || '';
+      const v = kw.replace(/^(?:search\s*)?keywords?\s*[:：]\s*/i, '').replace(/["“”]/g, '').slice(0, 300);
+      RQ.set(q, v); return v;
+    } catch(e){ log(`换书上说法失败 ${p.name}：${errWhy(e)}`); if (e.status) coolDown(p, e); return ''; }
+  }
+  return '';
+}
 // 提示用：分数够高才带上（不相关的段发过去反而误导），最多 5 段
 const REF_MIN = 7.5;
-function refPick(q){
-  const r = refSearch(q, 8);
+function refPick(q, kw){
+  const r = refSearch(kw && !/^-/.test(kw) ? q + ' ' + kw : q, 8);
   if (!r.length || r[0].score < REF_MIN || r[0].hit < 2) return [];
   return r.filter(x => x.score >= Math.max(REF_MIN * 0.7, r[0].score * 0.5) && x.hit >= 2).slice(0, 5);
 }
-const refLabel = x => `${x.b} §${x.s}`;
+const isClause = s => /^(?:[A-O]\.)?\d+(?:\.\d+)*|^(?:Table|Figure|Annex)\b/.test(String(s || ''));
+const refLabel = x => isClause(x.s) ? `${x.b} §${x.s}${x.p ? ' · 第 ' + x.p + ' 页' : ''}` : `${x.b}${x.p ? ' 第 ' + x.p + ' 页' : ''}${x.s ? ' · ' + x.s : ''}`;
 // 卡片底部的出处：📖 按钮点开看原文；技术题但没用上资料的标 ⚠
 function srcHtml(rec){
   if (!rec) return '';
-  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(x.b)} §${esc(x.s)}</b> · ${esc(x.h || '')}${x.p ? ' · 第 ' + x.p + ' 页' : ''}<br>${esc(x.t || '').replace(/\n/g, '<br>')}</div>`).join('') + '</div>';
+  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(refLabel(x))}</b>${x.h && x.h !== x.s ? ' · ' + esc(x.h) : ''}<br>${esc(x.t || '').replace(/\n/g, '<br>')}</div>`).join('') + '</div>';
   if (rec.nosrc) return '<div class="srcs"><span class="nosrc">⚠ 没查到出处</span></div>';
   return '';
 }
@@ -2503,7 +2525,7 @@ function bookRender(){
   if (!REF.docs.length){ box.innerHTML = '<div class="hint">还没有资料。在电脑上打开这个网页 → 设置 → 资料 → 导入资料。</div>'; return; }
   if (!q){ box.innerHTML = `<div class="hint">输入英文关键词或条款号，比如 vent flat roof、gas meter clearance、8.14.2。<br>现有资料：${REF.books.map(b => esc(b.name)).join('、')}</div>`; return; }
   const r = refSearch(q, 20), qs = new Set(refTok(q));
-  box.innerHTML = r.length ? r.map(x => `<div class="refc"><div class="refh">📖 ${esc(refLabel({b:x.d.b, s:x.d.c.s}))}<span class="muted"> · ${esc(x.d.c.h || '')}${x.d.c.p ? ' · 第 ' + x.d.c.p + ' 页' : ''}</span></div><div class="reft">${refHL(x.d.c.t, qs)}</div></div>`).join('')
+  box.innerHTML = r.length ? r.map(x => `<div class="refc"><div class="refh">📖 ${esc(refLabel({b:x.d.b, s:x.d.c.s, p:x.d.c.p}))}<span class="muted">${x.d.c.h && x.d.c.h !== x.d.c.s ? ' · ' + esc(x.d.c.h) : ''}</span></div><div class="reft">${refHL(x.d.c.t, qs)}</div></div>`).join('')
     : '<div class="hint">没搜到。换个说法试试（用英文，规范原文是英文）</div>';
   box.scrollTop = 0;
 }
@@ -2531,9 +2553,9 @@ SHORT: <one natural, friendly Canadian English reply the student can say right n
 中文：<what the other person means and their tone, one short sentence in Simplified Chinese>
 DETAIL: <in Simplified Chinese: 2-3 other ways to reply (casual / polite, in English), and explain any slang or idioms they used>
 C) The selected text is not a question (a statement, joke, instruction) -> SHORT = a fitting short reply or the key point; 中文 = what they are saying; DETAIL = more explanation if useful.
-Code excerpts: if "Code excerpts" are given and relevant, base the answer on them; you may cite a clause number only if it appears in those excerpts. They come from a keyword search and may be irrelevant: ignore irrelevant ones.
+Book excerpts: if "Book excerpts" (CSA B149 codes and the CSA Gas Trade Training Unit textbooks) are given and relevant, base the answer on them; you may cite a clause number only if it appears in those excerpts. They come from a keyword search and may be irrelevant: ignore irrelevant ones.
 Write exactly these lines: SHORT: / 中文： / DETAIL: as above, then one last line:
-REF: <situation A: the numbers of the code excerpts you actually used, e.g. "1, 3"; "none" if no excerpts were given or none of them support the answer. Situation B or C: "-">
+REF: <situation A: the numbers of the book excerpts you actually used, e.g. "1, 3"; "none" if no excerpts were given or none of them support the answer. Situation B or C: "-">
 No other text, no markdown.`;
 // 开始前选的课程（只是参考，模型每次自己按前 30 句判断场合）
 const COURSES = [
@@ -2707,12 +2729,19 @@ async function askNow(replace){
   if (cs.hint) u += 'Situation hint (picked by the student before starting; may be wrong): ' + cs.hint + '\n\n';
   if (gl.length) u += 'Glossary (English = Chinese):\n' + gl.map(g => `- ${g.en} = ${g.zh}`).join('\n') + '\n\n';
   if (ctx.length) u += 'Lecture just before (most recent last):\n' + ctx.join('\n') + '\n\n';
-  // 查资料（日常聊天不查）：问题太短就带上前一句
-  const refs = L.course === 'chat' || !REF.docs.length ? [] : refPick(refTok(q).length < 5 && ctx.length ? ctx[ctx.length - 1] + ' ' + q : q);
-  if (refs.length) u += 'Code excerpts (keyword search results; may be irrelevant):\n' + refs.map((r, i) => `[${i + 1}] ${r.d.b} ${r.d.c.s} (${r.d.c.h}): ${r.d.c.t}`).join('\n\n') + '\n\n';
+  // 查资料（日常聊天不查）：问题太短就带上前一句；先换成书上的说法再搜
+  const t0 = Date.now();
+  let refs = [], kw = '';
+  if (L.course !== 'chat' && REF.docs.length){
+    const rq = refTok(q).length < 5 && ctx.length ? ctx[ctx.length - 1] + ' ' + q : q;
+    ans.innerHTML = '<div class="azh">查书…</div>';
+    kw = await refQuery(rq);
+    if (my !== ASK.seq) return;
+    refs = refPick(rq, kw);
+  }
+  if (refs.length) u += 'Book excerpts (search results; may be irrelevant):\n' + refs.map((r, i) => `[${i + 1}] ${refLabel({b:r.d.b, s:r.d.c.s, p:r.d.c.p})} (${r.d.c.h}): ${r.d.c.t}`).join('\n\n') + '\n\n';
   u += 'Just said / asked (the selected text):\n' + q;
   ans.innerHTML = '<div class="azh">想一下…</div>';
-  const t0 = Date.now();
   try {
     const {p, text} = await askStream(ASK_PROMPT, u, s => { if (my === ASK.seq){ ansShow(s); askFit(); } }, ac.signal);
     if (my !== ASK.seq) return;
@@ -2723,7 +2752,7 @@ async function askNow(replace){
     const ref = parseAns(text).ref, used = [...new Set((ref.match(/\d+/g) || []).map(Number))].map(n => refs[n - 1]).filter(Boolean);
     if (used.length) rec.src = used.map(r => ({b:r.d.b, s:r.d.c.s, h:r.d.c.h, p:r.d.c.p, t:r.d.c.t}));
     else if (REF.books.length && !/^\s*-/.test(ref) && L.course !== 'chat') rec.nosrc = true;
-    log(`提示 ${p.name} ${sec}秒，查到 ${refs.length} 段${used.length ? '，用了 ' + used.map(r => refLabel({b:r.d.b, s:r.d.c.s})).join('、') : ''}`);
+    log(`提示 ${p.name} ${sec}秒，书上说法「${kw}」，查到 ${refs.length} 段${used.length ? '，用了 ' + used.map(r => refLabel({b:r.d.b, s:r.d.c.s, p:r.d.c.p})).join('、') : ''}`);
     ansShow(text, rec); askFit();
     if (!L.qa) L.qa = [];
     // 点句子改选的，替换刚才那条（问错了的不留，收藏过的星号带过来）；按"提示"按钮问的是新的一条
