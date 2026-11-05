@@ -467,7 +467,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/4 23:18';
+const APP_VER = '11/4 23:49';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2600,6 +2600,8 @@ DETAIL: <in Simplified Chinese: 2-3 other ways to reply (casual / polite, in Eng
 C) The selected text is not a question (a statement, joke, instruction) -> SHORT = a fitting short reply or the key point; 中文 = what they are saying; DETAIL = more explanation if useful.
 Book excerpts: if "Book excerpts" (CSA B149 codes and the CSA Gas Trade Training Unit textbooks) are given and relevant, base the answer on them; you may cite a clause number only if it appears in those excerpts. They come from a keyword search and may be irrelevant: ignore irrelevant ones.
  Read the excerpt carefully and use the item that matches exactly what was asked (e.g. "a window or door that can be opened" and "a mechanical air-supply inlet" are different items with different distances). If the code value depends on a condition (appliance input in Btu/h, appliance type, natural gas vs propane), SHORT must give the values by condition, briefly, e.g. "6 in / 12 in / 3 ft by input".
+ If an excerpt states the answer, answer from it; never write "not sure" for something an excerpt states.
+Several questions: if the selected text contains more than one question, answer EACH one in order: SHORT = the short answers separated by "; " (e.g. "2 ft; 1.5 µA"), 中文 and DETAIL cover each one. Use "not sure" only for the one you cannot answer, never for all of them.
 Write exactly these lines: SHORT: / 中文： / DETAIL: as above, then two last lines:
 REF: <situation A: the numbers of the book excerpts you actually used, e.g. "1, 3"; "none" if no excerpts were given or none of them support the answer. Situation B or C: "-">
 QUOTE: <if REF has numbers: for EACH excerpt number in REF, write "[n] " and then copy word for word, exactly as written in that excerpt, the one sentence or list item (max 40 words) that states the answer; separate them with " | ", e.g. "[1] ... | [3] ...". Every number listed in REF must get its own [n] quote. Otherwise "-">
