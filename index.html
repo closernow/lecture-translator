@@ -104,7 +104,10 @@ a{color:#7fb7ff}
 #askAgain:empty{display:none}
 #askAgain button{font-size:12px;padding:3px 8px;border-radius:8px}
 #askBox.mini #askAgain{display:none}
-#askHint{font-size:12px;color:#56606b;margin-top:4px}
+#askHint{font-size:12px;color:#56606b}
+#askExt{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+#askExt button{font-size:12px;padding:3px 8px;border-radius:8px}
+#askBox.mini #askExt{display:none}
 #btnAsk{background:#2b5d8a;color:#fff}
 .qa{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:-4px 0 16px;background:var(--panel)}
 .qa .aq{font-size:13px;color:var(--muted)}
@@ -227,7 +230,7 @@ body.hasRef #btnBook{display:inline-block}
   <div id="askAns"></div>
   <div id="askMeta"></div>
   <div id="askAgain"></div>
-  <div id="askHint">选错了就点正确的那句（点相邻的句子是加上去），会重新问</div>
+  <div id="askExt"><button data-ext="prev">＋上一句</button><button data-ext="next">＋下一句</button><span id="askHint">点别的句子就换成问它；问题没选全就加一句</span></div>
 </div>
 
 <div id="bottom">
@@ -2589,10 +2592,12 @@ function pickQuestion(){
   return qAround(i);
 }
 // 第 i 句所在的问题：前一行没说完（不是句号结尾）就连上，最多往前两行；这行没问号、下一行有问号也连上
+// 以 what / how / is / can… 开头的行是新问题的开头：往前不连，也不被前面的连进去（以前会把下一个问题连成三行）
+const Q_START = /^\W*(what|why|how|which|who|when|where|can|could|does|do|did|is|are|was|were|should|would|will)\b/i;
 function qAround(i){
   const ls = L.lines, n = ls.length; let a = i, b = i;
-  while (a > 0 && i - a < 2 && !SENT_END.test(sureText(ls[a - 1].en)) && ls[a - 1].spk === ls[i].spk) a--;
-  if (!/\?/.test(lineText(ls[i])) && b + 1 < n && /\?/.test(lineText(ls[b + 1]))) b++;
+  while (a > 0 && i - a < 2 && !Q_START.test(lineText(ls[a])) && !SENT_END.test(sureText(ls[a - 1].en)) && ls[a - 1].spk === ls[i].spk) a--;
+  if (!/\?/.test(lineText(ls[i])) && b + 1 < n && /\?/.test(lineText(ls[b + 1])) && !Q_START.test(lineText(ls[b + 1]))) b++;
   return ls.slice(a, b + 1);
 }
 // 这句之前问过没有：新记录存了句子编号（ids），老记录按时间对（问答的 t = 问题最后一句 +0.01 秒）
@@ -2836,7 +2841,8 @@ if (window.ResizeObserver) new ResizeObserver(askFit).observe($('#subs'));
 // 点字幕上的句子（上课中，提示开没开都行）：
 // - 这句之前问过 → 直接显示那次的答案，不重新问
 // - 提示没开 → 双击才打开，问这句（前半句没说完的自动连上）
-// - 提示开着：点选中部分两头是去掉；紧挨着、而且接缝处没说完（不是句号问号结尾）是加上去；别的是换成那句
+// - 提示开着：点选中部分两头是去掉；点别的句子一律换成问它所在的问题（不再和刚才的连在一起，以前猜"要不要连"常猜错）
+//   问题没选全（拖了三行）就点卡片上的"＋上一句""＋下一句"
 //   停手 0.8 秒再问。只是调整选中范围、或者"提示"按钮自动选错了（1 分钟内、没收藏）才替换刚才那条，换成别的问题就是新的一条
 let tapLine = 0, tapAt = 0;
 $('#subs').addEventListener('click', e => {
@@ -2858,15 +2864,27 @@ $('#subs').addEventListener('click', e => {
   const s = ASK.sel, k = L.lines.indexOf(l), a = s.length ? L.lines.indexOf(s[0]) : -9, b = s.length ? L.lines.indexOf(s[s.length - 1]) : -9;
   if (old && old !== ASK.last && !s.includes(l)){ showRec(old); return; }
   let adjust = true;
-  const open = x => !SENT_END.test(sureText(x.en));   // 没说完的半句
   if (s.includes(l)){ if (s.length > 1 && (l === s[0] || l === s[s.length - 1])) ASK.sel = s.filter(x => x !== l); else return; }
-  else if (s.length && s.length < 5 && ((k === a - 1 && open(l)) || (k === b + 1 && open(s[s.length - 1])))) ASK.sel = k < a ? [l].concat(s) : s.concat([l]);
   else { ASK.sel = qAround(k); adjust = false; }
+  selAsk(adjust);
+});
+// 选中范围变了：停手 0.8 秒再问。调整范围、或"提示"按钮自动选错的那条（1 分钟内、没收藏）替换刚才那条，别的是新的一条
+function selAsk(adjust){
   const r = ASK.last, replace = adjust || !!(r && r.auto && !r.star && Date.now() - (r.at || 0) < 60000);
   ASK.auto = false; showSel();
   if (ASK.ac) ASK.ac.abort();
-  $('#askAns').innerHTML = '<div class="azh">选好了就停手，马上问…</div>'; $('#askMeta').textContent = '';
+  $('#askAns').innerHTML = '<div class="azh">选好了就停手，马上问…</div>'; $('#askMeta').textContent = ''; $('#askAgain').innerHTML = '';
   clearTimeout(ASK.timer); ASK.timer = setTimeout(() => askNow(replace), 800);
+}
+// "＋上一句""＋下一句"：问题拖了好几行、自动没连全时手动加（最多 6 行）
+$('#askExt').addEventListener('click', e => {
+  const b = e.target.closest('[data-ext]'); if (!b) return;
+  e.stopPropagation();
+  const s = ASK.sel; if (!s.length || s.length >= 6) return;
+  const i = b.dataset.ext === 'prev' ? L.lines.indexOf(s[0]) - 1 : L.lines.indexOf(s[s.length - 1]) + 1;
+  const l = L.lines[i]; if (!l || !lineText(l)) { toast(b.dataset.ext === 'prev' ? '前面没有了' : '后面没有了'); return; }
+  ASK.sel = b.dataset.ext === 'prev' ? [l].concat(s) : s.concat([l]);
+  selAsk(true);
 });
 
 function updateButtons(){
