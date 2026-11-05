@@ -2581,11 +2581,34 @@ function pickQuestion(){
   let i = -1;
   for (let k = n - 1; k >= Math.max(0, n - 6); k--) if (Q_RE.test(lineText(ls[k]))){ i = k; break; }
   if (i < 0) return ls.slice(Math.max(0, n - 2)).filter(l => lineText(l));   // 找不到像问题的，就拿最近两句
-  let a = i, b = i;
-  // 问题被断成两行：前一行没说完（不是句号结尾）就连上，最多往前两行；这行没问号、下一行有问号也连上
+  return qAround(i);
+}
+// 第 i 句所在的问题：前一行没说完（不是句号结尾）就连上，最多往前两行；这行没问号、下一行有问号也连上
+function qAround(i){
+  const ls = L.lines, n = ls.length; let a = i, b = i;
   while (a > 0 && i - a < 2 && !SENT_END.test(sureText(ls[a - 1].en)) && ls[a - 1].spk === ls[i].spk) a--;
   if (!/\?/.test(lineText(ls[i])) && b + 1 < n && /\?/.test(lineText(ls[b + 1]))) b++;
   return ls.slice(a, b + 1);
+}
+// 这句之前问过没有：新记录存了句子编号（ids），老记录按时间对（问答的 t = 问题最后一句 +0.01 秒）
+function qaOf(l){
+  const qa = L.qa || [];
+  for (let k = qa.length - 1; k >= 0; k--){
+    const r = qa[k];
+    if (r.ids ? r.ids.includes(l.id) : Math.abs(r.t - l.t - 0.01) < 0.006) return r;
+  }
+  return null;
+}
+// 直接显示之前问过的答案，不重新问
+function showRec(r){
+  clearTimeout(ASK.timer); clearTimeout(ASK.mini); ASK.seq++;
+  if (ASK.ac){ ASK.ac.abort(); ASK.ac = null; }
+  const ls = r.ids ? r.ids.map(id => L.lines.find(x => x.id === id)).filter(Boolean) : L.lines.filter(x => Math.abs(r.t - x.t - 0.01) < 0.006);
+  if (ls.length) ASK.sel = ls;
+  showSel(); $('#askQ').textContent = '问：' + r.q;
+  $('#askBox').classList.remove('det');
+  ansShow(r.a, r); $('#askMeta').textContent = `之前问过 · ${r.m || ''}`;
+  ASK.last = r; starShow(); askMini(false); askFit();
 }
 function showSel(){
   document.querySelectorAll('#subs .line.qsel').forEach(e => e.classList.remove('qsel'));
@@ -2751,7 +2774,8 @@ async function askNow(replace){
     if (my !== ASK.seq) return;
     const sec = ((Date.now() - t0) / 1000).toFixed(1);
     meta.textContent = `${p.name} · ${sec} 秒`; askFit();
-    const rec = {t:Math.round(sel[sel.length - 1].t * 100 + 1) / 100, q, a:cleanOut(text).replace(/<think>[\s\S]*$/, '').trim(), m:p.name};
+    const rec = {t:Math.round(sel[sel.length - 1].t * 100 + 1) / 100, q, a:cleanOut(text).replace(/<think>[\s\S]*$/, '').trim(), m:p.name, ids:sel.map(x => x.id)};
+    if (ASK.auto){ rec.auto = true; rec.at = Date.now(); }
     // 出处：模型说用了第几段就记那几段（带原文，资料删了也看得到）；技术题没用上资料的标"没查到出处"
     const ref = parseAns(text).ref, used = [...new Set((ref.match(/\d+/g) || []).map(Number))].map(n => refs[n - 1]).filter(Boolean);
     if (used.length) rec.src = used.map(r => ({b:r.d.b, s:r.d.c.s, h:r.d.c.h, p:r.d.c.p, t:r.d.c.t}));
@@ -2773,7 +2797,10 @@ $('#btnAsk').onclick = () => {
   const sel = pickQuestion();
   if (!sel.length){ toast('还没有字幕'); return; }
   if (!PROVIDERS.some(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim())){ toast('先在设置里填翻译用的 key'); return; }
-  ASK.sel = sel; askOpen(true); showSel(); askNow(false);
+  ASK.sel = sel; askOpen(true);
+  const old = qaOf(sel[sel.length - 1]);
+  if (old){ showRec(old); return; }   // 最新这个问题刚问过，直接显示
+  ASK.auto = true; showSel(); askNow(false);
 };
 $('#askClose').onclick = e => { e.stopPropagation(); askOpen(false); };
 $('#askStar').onclick = e => {
@@ -2787,19 +2814,34 @@ $('#askBox').addEventListener('click', () => askMini(false));
 // 答案卡片变高、字幕区变矮时，跟随最新的话保持在最底下
 function askFit(){ const b = $('#subs'); if (stick && !askHold()) b.scrollTop = b.scrollHeight; }
 if (window.ResizeObserver) new ResizeObserver(askFit).observe($('#subs'));
-// 答案卡片开着时点字幕：点紧挨着选中部分的句子是加上去，点别的是换成那句；点选中部分两头的句子是去掉
+// 点字幕上的句子（上课中，提示开没开都行）：
+// - 这句之前问过 → 直接显示那次的答案，不重新问
+// - 提示没开 → 打开，问这句（前半句没说完的自动连上）
+// - 提示开着：点选中部分两头是去掉；紧挨着、而且接缝处没说完（不是句号问号结尾）是加上去；别的是换成那句
+//   停手 0.8 秒再问。只是调整选中范围、或者"提示"按钮自动选错了（1 分钟内、没收藏）才替换刚才那条，换成别的问题就是新的一条
 $('#subs').addEventListener('click', e => {
-  if (!ASK.open) return;
+  if (L.state === 'idle' && !ASK.open) return;
   const el = e.target.closest('.line'); if (!el) return;
-  const l = L.lines.find(x => 'ln' + x.id === el.id); if (!l) return;
+  const l = L.lines.find(x => 'ln' + x.id === el.id); if (!l || !lineText(l)) return;
+  if (!PROVIDERS.some(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim())){ toast('先在设置里填翻译用的 key'); return; }
+  const old = qaOf(l);
+  if (!ASK.open){
+    askOpen(true);
+    if (old){ showRec(old); return; }
+    ASK.sel = qAround(L.lines.indexOf(l)); ASK.auto = false; showSel(); askNow(false); return;
+  }
   const s = ASK.sel, k = L.lines.indexOf(l), a = s.length ? L.lines.indexOf(s[0]) : -9, b = s.length ? L.lines.indexOf(s[s.length - 1]) : -9;
+  if (old && old !== ASK.last && !s.includes(l)){ showRec(old); return; }
+  let adjust = true;
+  const open = x => !SENT_END.test(sureText(x.en));   // 没说完的半句
   if (s.includes(l)){ if (s.length > 1 && (l === s[0] || l === s[s.length - 1])) ASK.sel = s.filter(x => x !== l); else return; }
-  else if (s.length && s.length < 5 && (k === a - 1 || k === b + 1)) ASK.sel = k < a ? [l].concat(s) : s.concat([l]);
-  else ASK.sel = [l];
-  showSel();
+  else if (s.length && s.length < 5 && ((k === a - 1 && open(l)) || (k === b + 1 && open(s[s.length - 1])))) ASK.sel = k < a ? [l].concat(s) : s.concat([l]);
+  else { ASK.sel = qAround(k); adjust = false; }
+  const r = ASK.last, replace = adjust || !!(r && r.auto && !r.star && Date.now() - (r.at || 0) < 60000);
+  ASK.auto = false; showSel();
   if (ASK.ac) ASK.ac.abort();
-  $('#askAns').innerHTML = '<div class="azh">选好了就停手，马上重新问…</div>'; $('#askMeta').textContent = '';
-  clearTimeout(ASK.timer); ASK.timer = setTimeout(() => askNow(true), 800);
+  $('#askAns').innerHTML = '<div class="azh">选好了就停手，马上问…</div>'; $('#askMeta').textContent = '';
+  clearTimeout(ASK.timer); ASK.timer = setTimeout(() => askNow(replace), 800);
 });
 
 function updateButtons(){
