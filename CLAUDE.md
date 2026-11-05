@@ -34,6 +34,8 @@
 
 ## 工具使用的坑
 
+- **别用老 Safari 不认的 JS 写法**：正则"往回看" `(?<=…)` `(?<!…)`、`.at()`、`??=`、`structuredClone` 等。用户 iPad 的 Safari 不认 `(?<=\?)`，整个脚本直接不运行（11/4 深夜：设置打不开、版本号不显示）。改完 `grep -nE '\(\?<[=!]' index.html` 查一遍
+
 - **用 Python 打补丁改 index.html 时，正则里的 `\b` 要用原始字符串（r'...'）**：普通字符串里 `\b` 会变成退格控制字符（0x08），JS 不报错但正则失效（11/4 踩了三次）。改完用 `grep -c $'\x08' index.html` 查，应为 0；Git Bash 的 sed 换不回来，用 Edit 工具改
 
 - **别用 PowerShell 的 `Set-Content -Encoding utf8` 改 index.html**：会在文件开头加 BOM（`ef bb bf`）；改了要用 `sed -i '1s/^\xEF\xBB\xBF//'` 去掉
