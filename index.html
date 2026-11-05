@@ -467,7 +467,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/4 23:57';
+const APP_VER = '11/5 10:54';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2423,19 +2423,23 @@ function refSearch(q, k = 6){
 // 老师的说法常和书上不一样（window or door ↔ building opening）：先让快模型把问题换成书上的用词，和原话一起搜
 const RQ_PROMPT = `Turn a question from a gas / HVAC class (live speech recognition, may contain errors) into search keywords for the CSA B149.1 / B149.2 codes and the CSA Gas Trade Training Units (textbooks).
 Output ONE line of 5-15 English keywords and short phrases, using the terms those books use, e.g. "window or door" -> "building opening"; "air the furnace needs" -> "air supply combustion air"; "B vent sticking out of the roof" -> "vent termination roof"; "flexible gas hose" -> "gas connector". Keep the main subject words (appliance, part, number). Do NOT include book or standard names (CSA, B149, Unit, code). No explanation.
+If "Recent lecture" lines are given, use them to fix speech-recognition errors in the question (e.g. after talk about construction heaters, "construction meter" = "construction heater") and to understand what "it / that" means. If the lecture names a clause number about the same thing (spoken "six point twenty point three" = 6.20.3), add that number.
 If it is not a technical question, output "-".`;
 const RQ = new Map();
-async function refQuery(q){
-  if (RQ.has(q)) return RQ.get(q);
+// ctxT：问题前面几句。识别常有错字（11/5 实测 construction heater 认成 construction meter，前几句老师刚说过 "Heaters. Construction" 和 6.20.3）
+async function refQuery(q, ctxT){
+  const key = q + '|' + (ctxT || '');
+  if (RQ.has(key)) return RQ.get(key);
+  const user = ctxT ? `Recent lecture (context only):\n${ctxT}\n\nQuestion: ${q}` : q;
   const order = PROVIDERS.filter(p => p.id === S.prefModel).concat(PROVIDERS.filter(p => p.id !== S.prefModel));
   for (const p of order){
     if (!S.enabled[p.id] || !(S.keys[p.keyName] || '').trim() || (cooldown[p.id] || 0) > Date.now()) continue;
     try {   // 只试一个、最多等 2.5 秒：慢了就只用原话搜，不耽误出答案
-      const out = await Promise.race([callProvider(p, RQ_PROMPT, q), new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 2500))]);
+      const out = await Promise.race([callProvider(p, RQ_PROMPT, user), new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 2500))]);
       const kw = cleanOut(out).split('\n').map(x => x.trim()).filter(Boolean)[0] || '';
       // 去掉书名（CSA B149.1、Unit 13 这种每段都可能有，只会把不相关的段抬上来）
       const v = kw.replace(/^(?:search\s*)?keywords?\s*[:：]\s*/i, '').replace(/["“”]/g, '').replace(/\b(?:CSA\s*)?B149(?:\.\d)?(?:-\d+)?\b|\bCSA\b|\bUnit\s*\d+\b/gi, ' ').replace(/(?:\s*,\s*){2,}/g, ', ').replace(/\s+/g, ' ').trim().slice(0, 300);
-      RQ.set(q, v); return v;
+      RQ.set(key, v); return v;
     } catch(e){ log(`换书上说法失败 ${p.name}：${errWhy(e)}`); if (e.status) coolDown(p, e); return ''; }
   }
   return '';
@@ -2823,12 +2827,14 @@ async function askNow(replace, force){
   let refs = [], kw = '';
   if (L.course !== 'chat' && REF.docs.length){
     ans.innerHTML = '<div class="azh">查书…</div>';
+    const ctxT = ctx.slice(-4).join(' ');   // 前 4 句给"换说法"看，用来纠正识别错字、带上老师刚提到的条款号
     // 一句里有好几个问题（问号隔开、每个 ≥4 个词）：分开各查各的，同时换说法，每题最多 3 段，合起来最多 6 段
     // 以前两题合在一起查一次，两个话题互相冲淡，两题都没查到（实测"取暖器软管多长 + 火焰信号多少"）
     // 不能用 (?<=\?) 这种"往回看"的正则：老 iPad Safari（16.4 以前）不认，整个脚本直接不运行（11/4 实测设置都打不开）
-    const parts = q.replace(/\?\s+/g, '?\n').split('\n').map(x => x.trim()).filter(x => refTok(x).length >= 3);
+    // 只有问号结尾的才算一个问题（"…meter? Have to look it up probably…" 后半截不是问题，别单独去查）
+    const parts = q.replace(/\?\s+/g, '?\n').split('\n').map(x => x.trim()).filter(x => /\?$/.test(x) && refTok(x).length >= 3);
     if (parts.length > 1){
-      const kws = await Promise.all(parts.map(x => refQuery(x)));
+      const kws = await Promise.all(parts.map(x => refQuery(x, ctxT)));
       if (my !== ASK.seq) return;
       kw = kws.join(' / ');
       const seen = new Set();
@@ -2836,7 +2842,7 @@ async function askNow(replace, force){
       refs = refs.slice(0, 6);
     } else {
       const rq = refTok(q).length < 5 && ctx.length ? ctx[ctx.length - 1] + ' ' + q : q;
-      kw = await refQuery(rq);
+      kw = await refQuery(rq, ctxT);
       if (my !== ASK.seq) return;
       refs = refPick(rq, kw);
     }
