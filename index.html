@@ -151,7 +151,8 @@ body.hasRef #btnBook{display:inline-block}
 .refrow > span:first-child{flex:1;min-width:0}
 .srcs{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start}
 .srcb{font-size:13px;padding:4px 8px;border-radius:8px;color:#9fc6ff}
-.srct{display:none;flex-basis:100%;font-size:13px;line-height:1.5;color:var(--muted);border-left:3px solid #3a5a8a;padding:4px 8px;max-height:40vh;overflow-y:auto}
+.srct mark.qhl{background:#6b5a14;color:#fff3c4;border-radius:3px;padding:0 2px}
+.srct{position:relative;display:none;flex-basis:100%;font-size:13px;line-height:1.5;color:var(--muted);border-left:3px solid #3a5a8a;padding:4px 8px;max-height:40vh;overflow-y:auto}
 .srct.show{display:block}
 .nosrc{font-size:12px;color:#d8a24a}
 
@@ -2445,16 +2446,41 @@ function refPick(q, kw){
 const isClause = s => /^(?:[A-O]\.)?\d+(?:\.\d+)*|^(?:Table|Figure|Annex)\b/.test(String(s || ''));
 const refLabel = x => isClause(x.s) ? `${x.b} §${x.s}${x.p ? ' · 第 ' + x.p + ' 页' : ''}` : `${x.b}${x.p ? ' 第 ' + x.p + ' 页' : ''}${x.s ? ' · ' + x.s : ''}`;
 // 卡片底部的出处：📖 按钮点开看原文；技术题但没用上资料的标 ⚠
+// 在原文里找 AI 抄出来的那句（QUOTE）：先按原样找（不管大小写、空格、引号），找不到就挑和它重合词最多的一句（≥60% 才标）
+function quoteSpan(t, q){
+  if (!t || !q) return null;
+  const norm = c => /[‘’]/.test(c) ? "'" : /[“”]/.test(c) ? '"' : /[–—]/.test(c) ? '-' : c.toLowerCase();
+  let nt = '', map = [];
+  for (let i = 0; i < t.length; i++){ const c = t[i]; if (/\s/.test(c)){ if (nt.endsWith(' ')) continue; nt += ' '; } else nt += norm(c); map.push(i); }
+  const nq = Array.from(q.replace(/\s+/g, ' ').trim()).map(norm).join('').replace(/[.;,]$/, '');
+  const k = nq.length >= 12 ? nt.indexOf(nq) : -1;
+  if (k >= 0) return [map[k], map[k + nq.length - 1] + 1];
+  const qw = new Set(refTok(q)); if (qw.size < 3) return null;
+  let best = null, bs = 0;
+  const re = /(?:[^.;\n]|\.(?!\s|$))+[.;]?/g; let m;   // 句号后面跟空格才算一句结束（1.8 m 里的点不算）
+  while ((m = re.exec(t))){
+    const w = new Set(refTok(m[0])); let hit = 0; qw.forEach(x => { if (w.has(x)) hit++; });
+    const sc = hit / qw.size;
+    if (sc > bs){ bs = sc; best = [m.index, m.index + m[0].length]; }
+  }
+  return bs >= 0.6 ? best : null;
+}
+function srcText(t, q){
+  const sp = quoteSpan(t, q), br = x => esc(x).replace(/\n/g, '<br>');
+  return sp ? br(t.slice(0, sp[0])) + '<mark class="qhl">' + br(t.slice(sp[0], sp[1])) + '</mark>' + br(t.slice(sp[1])) : br(t);
+}
 function srcHtml(rec){
   if (!rec) return '';
-  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(refLabel(x))}</b>${x.h && x.h !== x.s ? ' · ' + esc(x.h) : ''}<br>${esc(x.t || '').replace(/\n/g, '<br>')}</div>`).join('') + '</div>';
+  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(refLabel(x))}</b>${x.h && x.h !== x.s ? ' · ' + esc(x.h) : ''}<br>${srcText(x.t || '', rec.quote)}</div>`).join('') + '</div>';
   if (rec.nosrc) return '<div class="srcs"><span class="nosrc">⚠ 没查到出处</span></div>';
   return '';
 }
 document.addEventListener('click', e => {
   const b = e.target.closest('.srcb'); if (!b) return;
   e.stopPropagation();
-  const t = b.nextElementSibling; if (t) t.classList.toggle('show');
+  const t = b.nextElementSibling; if (!t) return;
+  t.classList.toggle('show');
+  const mk = t.querySelector('mark.qhl'); if (mk && t.classList.contains('show')) t.scrollTop = Math.max(0, mk.offsetTop - 30);
 }, true);
 async function refImport(file){
   let buf = new Uint8Array(await file.arrayBuffer());
@@ -2565,8 +2591,9 @@ DETAIL: <in Simplified Chinese: 2-3 other ways to reply (casual / polite, in Eng
 C) The selected text is not a question (a statement, joke, instruction) -> SHORT = a fitting short reply or the key point; 中文 = what they are saying; DETAIL = more explanation if useful.
 Book excerpts: if "Book excerpts" (CSA B149 codes and the CSA Gas Trade Training Unit textbooks) are given and relevant, base the answer on them; you may cite a clause number only if it appears in those excerpts. They come from a keyword search and may be irrelevant: ignore irrelevant ones.
  Read the excerpt carefully and use the item that matches exactly what was asked (e.g. "a window or door that can be opened" and "a mechanical air-supply inlet" are different items with different distances). If the code value depends on a condition (appliance input in Btu/h, appliance type, natural gas vs propane), SHORT must give the values by condition, briefly, e.g. "6 in / 12 in / 3 ft by input".
-Write exactly these lines: SHORT: / 中文： / DETAIL: as above, then one last line:
+Write exactly these lines: SHORT: / 中文： / DETAIL: as above, then two last lines:
 REF: <situation A: the numbers of the book excerpts you actually used, e.g. "1, 3"; "none" if no excerpts were given or none of them support the answer. Situation B or C: "-">
+QUOTE: <if REF has numbers: copy word for word, exactly as written in the excerpt, the one sentence or list item (max 40 words) that states the answer; otherwise "-">
 No other text, no markdown.`;
 // 开始前选的课程（只是参考，模型每次自己按前 30 句判断场合）
 const COURSES = [
@@ -2635,12 +2662,12 @@ function askOpen(v){
 // 拆答案：SHORT（老格式叫 EN）、中文、DETAIL（详细）；不按格式来的整段当中文显示
 function parseAns(s){
   s = String(s || '').replace(/<think>[\s\S]*?(<\/think>|$)/g, '').replace(/\*+/g, '').trim();
-  const out = {short:'', zh:'', det:'', ref:''}; let hit = false;
-  for (const ch of s.split(/\n(?=\s*(?:SHORT|EN|中文|DETAIL|详细|REF)\s*[:：])/i)){
-    const m = ch.match(/^\s*(SHORT|EN|中文|DETAIL|详细|REF)\s*[:：]\s*([\s\S]*)$/i);
+  const out = {short:'', zh:'', det:'', ref:'', quote:''}; let hit = false;
+  for (const ch of s.split(/\n(?=\s*(?:SHORT|EN|中文|DETAIL|详细|REF|QUOTE)\s*[:：])/i)){
+    const m = ch.match(/^\s*(SHORT|EN|中文|DETAIL|详细|REF|QUOTE)\s*[:：]\s*([\s\S]*)$/i);
     if (!m){ if (!hit) out.zh = ch.trim(); continue; }
     hit = true;
-    const k = /^(short|en)$/i.test(m[1]) ? 'short' : m[1] === '中文' ? 'zh' : /^ref$/i.test(m[1]) ? 'ref' : 'det';
+    const k = /^(short|en)$/i.test(m[1]) ? 'short' : m[1] === '中文' ? 'zh' : /^ref$/i.test(m[1]) ? 'ref' : /^quote$/i.test(m[1]) ? 'quote' : 'det';
     out[k] = m[2].trim();
   }
   return out;
@@ -2803,6 +2830,8 @@ async function askNow(replace, force){
     // 出处：模型说用了第几段就记那几段（带原文，资料删了也看得到）；技术题没用上资料的标"没查到出处"
     const ref = parseAns(text).ref, used = [...new Set((ref.match(/\d+/g) || []).map(Number))].map(n => refs[n - 1]).filter(Boolean);
     if (used.length) rec.src = used.map(r => ({b:r.d.b, s:r.d.c.s, h:r.d.c.h, p:r.d.c.p, t:r.d.c.t}));
+    const quote = parseAns(text).quote.replace(/^["“”'\s]+|["“”'\s]+$/g, '');
+    if (used.length && quote && quote !== '-') rec.quote = quote;
     else if (REF.books.length && !/^\s*-/.test(ref) && L.course !== 'chat') rec.nosrc = true;
     log(`提示 ${p.name} ${sec}秒，书上说法「${kw}」，查到 ${refs.length} 段${used.length ? '，用了 ' + used.map(r => refLabel({b:r.d.b, s:r.d.c.s, p:r.d.c.p})).join('、') : ''}`);
     ansShow(text, rec); askFit();
