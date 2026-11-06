@@ -347,7 +347,7 @@ body.hasRef #btnBook{display:inline-block}
       <div class="row"><label>首选模型</label><select id="prefModel"></select></div>
       <div class="hint">选了就先用它，被限流或出错时还是按下面的顺序换别的，不会翻不出来。</div>
       <div class="row"><label>"提示"用的模型</label><select id="askModel"></select></div>
-      <div class="hint">上课点"提示"时先用它。默认 gpt-oss-120b（快），不行按顺序换别的；想对比答案可以在卡片上"换模型再问"选 Gemini Flash（免费每天只有 20 次，常太忙）。Gemini Flash 不用来翻译。</div>
+      <div class="hint">上课点"提示"时先用它。默认 gpt-oss-120b（快），不行按顺序换别的；想对比答案可以在卡片上"换模型再问"。</div>
       <div id="provList"></div>
       <div class="hint">模型名一般不用改。哪家改了模型名或下线了，在这里改成新名字。</div>
     </div>
@@ -458,14 +458,13 @@ const PROVIDERS = [
   {id:'groq-qwen',   name:'Qwen 3.8 27B · Groq',  kind:'openai', base:'https://api.groq.com/openai/v1', keyName:'groq',   model:'qwen/qwen3.8-27b', extra:{reasoning_effort:'none'}},
   // 11/5 去掉 gpt-oss-20b（翻译术语硬翻、有意思翻错）和 Gemma 3 27B（模型已下架，Gemma 4 免费层报 500）
   {id:'gemini-lite', name:'Gemini Flash-Lite',    kind:'gemini', keyName:'gemini', model:'gemini-flash-lite-latest'},
-  {id:'gemini-flash',name:'Gemini Flash',         kind:'gemini', keyName:'gemini', model:'gemini-flash-latest'},
   // 硅基流动服务器在国内，从加拿大连过去慢，放最后
   {id:'sf-qwen8b',   name:'Qwen3-8B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'Qwen/Qwen3-8B', extra:{enable_thinking:false}},
   {id:'sf-glm',      name:'GLM-4-9B · 硅基流动',   kind:'openai', base:'https://api.siliconflow.cn/v1',  keyName:'sf',     model:'THUDM/GLM-4-9B-0414'},
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/5 14:20';
+const APP_VER = '11/5 15:10';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -775,8 +774,8 @@ function coolDown(p, e){
 }
 
 // 翻译默认顺序：gpt-oss-120b → Qwen → Flash-Lite → 硅基流动；Gemini Flash 不用来翻译（免费每天只有 20 次，留给"提示"）
-// 11/5 用户定：提示问得不多，先用 Gemini Flash；120b 翻译用户一直觉得好，翻译先用它（一节课大约 40–50 分钟会用光，之后自动换 Qwen）
-const trOrder = () => PROVIDERS.filter(p => p.id !== 'gemini-flash');
+// 11/5 用户定：120b 翻译用户一直觉得好，翻译先用它（一节课大约 40–50 分钟会用光，之后自动换 Qwen）；Gemini Flash 免费额度太少又常太忙，用户说不要了，已从列表删掉
+const trOrder = () => PROVIDERS.slice();
 async function translateWithFallback(sys, user){
   let lastErr = null, tried = 0;
   // 设置里选了首选模型就先试它，其余照原来的顺序
@@ -2786,7 +2785,7 @@ function askMini(v){
 function againShow(){
   const box = $('#askAgain'), r = ASK.last;
   if (!r || ASK.ac){ box.innerHTML = ''; return; }
-  const ps = PROVIDERS.filter(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim() && /^(groq-gptoss|gemini-flash|groq-qwen)$/.test(p.id));
+  const ps = PROVIDERS.filter(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim() && /^(groq-gptoss|groq-qwen)$/.test(p.id));
   box.innerHTML = ps.length ? '换模型再问：' + ps.map(p => `<button data-again="${p.id}">${esc(p.name.replace(/ · .*/, ''))}</button>`).join('') : '';
 }
 $('#askAgain').addEventListener('click', e => {
