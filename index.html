@@ -464,7 +464,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/5 15:10';
+const APP_VER = '11/5 16:30';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2377,6 +2377,7 @@ function refTok(s){
   const out = [];
   // cut-off / cutoff / cut off 都要对得上：带连字符的词同时算连写和分开
   s = String(s || '').toLowerCase().replace(/([a-z]+)-([a-z]+)/g, '$1$2 $1 $2');
+  s = s.replace(/\boutside\b/g, 'outdoor');   // 书上多写 outdoor air supply，口语常说 outside air（11/5 测试 #8 查不到 8.2.3）
   for (let w of s.match(/[a-z]+|\d+(?:\.\d+)*/g) || []){
     if (/^[a-z]/.test(w)){
       if (w.length < 2 || REF_STOP.has(w)) continue;
@@ -2387,6 +2388,9 @@ function refTok(s){
   }
   return out;
 }
+// 相邻两个词连成一条（"gas hose" → "gas_hose"），搜的时候词组挨着出现的段加分。11/5 测试：问 gas hose 多热不行，
+// 6.20.3 被只是 temperature 出现很多次的表格段压下去
+const refBi = t => { const o = []; for (let i = 1; i < t.length; i++) if (/^[a-z]/.test(t[i - 1]) && /^[a-z]/.test(t[i])) o.push(t[i - 1] + '_' + t[i]); return o; };
 function refBuild(){
   const docs = [], post = new Map(); let tot = 0;
   for (const b of REF.books) for (const c of b.chunks || []){
@@ -2394,6 +2398,7 @@ function refBuild(){
     const i = docs.length, toks = refTok(c.h + ' ' + c.t);
     docs.push({b:b.id, c, n:toks.length}); tot += toks.length;
     const tf = new Map(); toks.forEach(w => tf.set(w, (tf.get(w) || 0) + 1));
+    refBi(toks).forEach(w => tf.set(w, (tf.get(w) || 0) + 1));   // 相邻两个词也记一条（gas hose），不算进段落长度
     tf.forEach((f, w) => { let a = post.get(w); if (!a) post.set(w, a = []); a.push(i, f); });
   }
   Object.assign(REF, {docs, post, avgLen:tot / Math.max(1, docs.length)});
@@ -2406,7 +2411,7 @@ async function refLoad(){
 // BM25 打分；问题里直接写了条款号（8.14.2）的，那段加分
 function refSearch(q, k = 6){
   const N = REF.docs.length; if (!N) return [];
-  const qs = [...new Set(refTok(q))], sc = new Float64Array(N), hit = new Uint8Array(N);
+  const qt = refTok(q), qs = [...new Set(qt)], sc = new Float64Array(N), hit = new Uint8Array(N);
   const k1 = 1.2, bb = 0.75;
   for (const w of qs){
     const a = REF.post.get(w); if (!a) continue;
@@ -2416,6 +2421,11 @@ function refSearch(q, k = 6){
       sc[i] += idf * f * (k1 + 1) / (f + k1 * (1 - bb + bb * REF.docs[i].n / REF.avgLen)); hit[i]++;
     }
   }
+  for (const w of new Set(refBi(qt))){   // 词组加分（不算进命中词数）
+    const a = REF.post.get(w); if (!a) continue;
+    const df = a.length / 2, idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
+    for (let j = 0; j < a.length; j += 2){ const i = a[j], f = a[j + 1]; sc[i] += 0.5 * idf * f * (k1 + 1) / (f + k1 * (1 - bb + bb * REF.docs[i].n / REF.avgLen)); }
+  }
   const cls = qs.filter(w => /^\d+\.\d+/.test(w));
   if (cls.length) REF.docs.forEach((d, i) => { if (String(d.c.s).split('–').some(x => cls.some(w => x === w || x.startsWith(w + '.')))) { sc[i] += 10; hit[i]++; } });
   const idx = []; for (let i = 0; i < N; i++) if (sc[i] > 0) idx.push(i);
@@ -2424,7 +2434,7 @@ function refSearch(q, k = 6){
 }
 // 老师的说法常和书上不一样（window or door ↔ building opening）：先让快模型把问题换成书上的用词，和原话一起搜
 const RQ_PROMPT = `Turn a question from a gas / HVAC class (live speech recognition, may contain errors) into search keywords for the CSA B149.1 / B149.2 codes and the CSA Gas Trade Training Units (textbooks).
-Output ONE line of 5-15 English keywords and short phrases, using the terms those books use, e.g. "window or door" -> "building opening"; "air the furnace needs" -> "air supply combustion air"; "B vent sticking out of the roof" -> "vent termination roof"; "flexible gas hose" -> "gas connector". Keep the main subject words (appliance, part, number). Do NOT include book or standard names (CSA, B149, Unit, code). No explanation.
+Output ONE line of 5-15 English keywords and short phrases, using the terms those books use, e.g. "window or door" -> "building opening"; "air the furnace needs" -> "air supply combustion air"; "B vent sticking out of the roof" -> "vent termination roof"; "flex connector on a range" -> "gas connector"; "outside air" -> "outdoor air supply"; "small water heater" -> "input Btu/h". "Gas hose" and "gas connector" are DIFFERENT items in B149.1 (hose = Clause 6.20, connector = Clause 6.21): keep whichever word the speaker used, never swap one for the other. Keep the main subject words (appliance, part, number). Do NOT include book or standard names (CSA, B149, Unit, code). No explanation.
 If "Recent lecture" lines are given, use them to fix speech-recognition errors in the question (e.g. after talk about construction heaters, "construction meter" = "construction heater") and to understand what "it / that" means. If the lecture names a clause number about the same thing (spoken "six point twenty point three" = 6.20.3), add that number.
 If it is not a technical question, output "-".`;
 const RQ = new Map();
@@ -2607,6 +2617,7 @@ C) The selected text is not a question (a statement, joke, instruction) -> SHORT
 Book excerpts: if "Book excerpts" (CSA B149 codes and the CSA Gas Trade Training Unit textbooks) are given and relevant, base the answer on them; you may cite a clause number only if it appears in those excerpts. They come from a keyword search and may be irrelevant: ignore irrelevant ones.
  Read the excerpt carefully and use the item that matches exactly what was asked (e.g. "a window or door that can be opened" and "a mechanical air-supply inlet" are different items with different distances). If the code value depends on a condition (appliance input in Btu/h, appliance type, natural gas vs propane), SHORT must give the values by condition, briefly, e.g. "6 in / 12 in / 3 ft by input".
  If an excerpt states the answer, answer from it; never write "not sure" for something an excerpt states.
+ "What does X do / how does X work": SHORT must name the key condition and action (what it senses or needs, and what it then does), e.g. "Opens only when the pilot heats its bulb", not a vague "controls gas to the burner".
 Several questions: if the selected text contains more than one question, answer EACH one in order: SHORT = the short answers separated by "; " (e.g. "2 ft; 1.5 µA"), 中文 and DETAIL cover each one. Use "not sure" only for the one you cannot answer, never for all of them.
 Write exactly these lines: SHORT: / 中文： / DETAIL: as above, then two last lines:
 REF: <situation A: the numbers of the book excerpts you actually used, e.g. "1, 3"; "none" if no excerpts were given or none of them support the answer. Situation B or C: "-">
@@ -2841,8 +2852,10 @@ async function askNow(replace, force){
       if (my !== ASK.seq) return;
       kw = kws.join(' / ');
       const seen = new Set();
-      parts.forEach((x, i) => refPick(x, kws[i]).slice(0, 3).forEach(r => { if (!seen.has(r.d)){ seen.add(r.d); refs.push(r); } }));
-      refs = refs.slice(0, 6);
+      // 每题 4 段、合起来最多 8 段（11/5 测试：火焰信号 1.5 µA 那段排第 4，以前每题只带 3 段就漏了，AI 答 not sure）
+      const per = parts.length === 2 ? 4 : 3;
+      parts.forEach((x, i) => refPick(x, kws[i]).slice(0, per).forEach(r => { if (!seen.has(r.d)){ seen.add(r.d); refs.push(r); } }));
+      refs = refs.slice(0, 8);
     } else {
       const rq = refTok(q).length < 5 && ctx.length ? ctx[ctx.length - 1] + ' ' + q : q;
       kw = await refQuery(rq, ctxT);
