@@ -464,7 +464,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/5 16:30';
+const APP_VER = '11/6 17:00';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2147,7 +2147,7 @@ const Cloud = {
       this.ids.delete(f.name);
     }
     // 下课后：几段小录音合成一个"整节课录音.mp3"，Drive 和本机都只留这一个（只由录这节课的设备做）
-    const mergeFail = lsGet('lt.mergeFail', {});
+    const mergeFail = lsGet('lt.mergeFail2', {});
     for (const s of sessNow.values()){
       const sg = s.segs || [];   // MP3 方式录的只有一段也走这里，Drive 里统一叫"整节课录音.mp3"
       if (!mine(s) || !(sg.length >= 2 || (sg.length === 1 && sg[0].cont)) || (P.sess && P.sess.id === s.id) || (mergeFail[s.id] || 0) >= 2) continue;
@@ -2170,7 +2170,7 @@ const Cloud = {
         log(`已合成整节课录音：${s.title}，${Math.round(dur / 60)} 分钟 ${(blob.size / 1048576).toFixed(1)}MB，小段已删`);
       } catch(e){
         if (e.status === 401) throw e;
-        if (!e.net && !e.status) { mergeFail[s.id] = (mergeFail[s.id] || 0) + 1; lsSet('lt.mergeFail', mergeFail); }   // 联网问题下次再试；文件本身有问题试两次就算了
+        if (!e.net && !e.status) { mergeFail[s.id] = (mergeFail[s.id] || 0) + 1; lsSet('lt.mergeFail2', mergeFail); }   // 联网问题下次再试；文件本身有问题试两次就算了
         log(`合成整节课录音没成功：${s.title}（${e.message}），小段先留着`);
       }
       this.msg = '同步中…'; renderCloud();
@@ -2180,9 +2180,15 @@ const Cloud = {
     const keepMs = Math.max(0, +S.keepDays || 0) * 86400e3;
     for (const r of await DB.allSegs()){
       if (!r.blob) continue;
-      const sess = sessNow.get(r.sessionId);
-      if (!sess){ await DB.delKey(r.key); continue; }   // 课已经删了
-      if (!(sess.segs || []).some(g => g.idx === r.idx)){ await DB.delKey(r.key); continue; }   // 已经合成成整节课录音，旧小段不要了
+      // 正在上的课不碰。11/6 实测：同步开头记下课的名单，跑了好几分钟（合成上一节）期间点了"开始"，
+      // 新课第 1 段录音存进来时名单上没有这节课，被当成"课已删"删掉了，那一分钟录音找不回来
+      if (L.state !== 'idle' && L.session && L.session.id === r.sessionId) continue;
+      let sess = sessNow.get(r.sessionId);
+      if (!sess || !(sess.segs || []).some(g => g.idx === r.idx)){   // 删之前重新从本机读一次，别拿同步开头的旧名单判断
+        sess = await DB.getSession(r.sessionId);
+        if (!sess){ await DB.delKey(r.key); continue; }   // 课已经删了
+        if (!(sess.segs || []).some(g => g.idx === r.idx)){ await DB.delKey(r.key); continue; }   // 已经合成成整节课录音，旧小段不要了
+      }
       const key = r.sessionId + '-' + r.idx;
       if (!r.up){
         if (!this.audio.has(key)){
@@ -3153,6 +3159,13 @@ function hlFollow(on){
 }
 // 播放时每一帧更新（timeupdate 一秒才几次，逐词高亮会跟不上）
 function hlLoop(){ HL.raf = 0; if ($('#player').paused || !P.segs.length) return; plShow(); HL.raf = requestAnimationFrame(hlLoop); }
+async function silentMp3(dur){
+  await loadLame();
+  const enc = new lamejs.Mp3Encoder(1, MP3_RATE, MP3_KBPS), z = new Int16Array(1152 * 32), out = [];
+  for (let n = Math.round(Math.max(0, dur) * MP3_RATE); n > 0; n -= z.length){ const m = enc.encodeBuffer(n >= z.length ? z : z.subarray(0, n)); if (m.length) out.push(new Uint8Array(m)); }
+  const m = enc.flush(); if (m.length) out.push(new Uint8Array(m));
+  return new Blob(out, {type:'audio/mpeg'});
+}
 async function segBlob(sess, seg){
   if (seg.blob) return seg.blob;   // 老格式，已经拼好
   if (seg.parts){ const bs = []; for (const g of seg.parts) bs.push(await segBlob(sess, g)); return new Blob(bs, {type:'audio/mpeg'}); }   // MP3 方式的几段，接成一个
@@ -3161,7 +3174,15 @@ async function segBlob(sess, seg){
   if (!Cloud.st.on) throw new Error('这段录音不在本机，开启云同步后才能从云端取');
   if (!Cloud.ready()) throw new Error('云同步登录过期，先去设置点"立即同步"');
   const id = await Cloud.audioId(sess.id, seg.idx);
-  if (!id) throw new Error('云端没有这段录音（可能录音的设备还没上传）');
+  if (!id){
+    // 录这节课的就是本机，本机和云端都没有：这段真的丢了（11/6 被同步误删过第 1 段）。用一样长的静音补上，
+    // 合成、导出、播放都不会因为缺一段整节失败，后面的字幕时间也还对得上。别的设备可能只是还没上传，照样报错
+    if (seg.cont && (!sess.device || sess.device === DEVICE_ID)){
+      log(`录音第${seg.idx + 1}段找不到了（本机和云端都没有），用 ${Math.round(seg.dur)} 秒静音补上：${sess.title}`);
+      return silentMp3(seg.dur);
+    }
+    throw new Error('云端没有这段录音（可能录音的设备还没上传）');
+  }
   toast('正在从云端下载录音…', 2000);
   const got = await (await Cloud.api('GET', `https://www.googleapis.com/drive/v3/files/${id}?alt=media`)).blob();
   const blob = new Blob([got], {type:seg.mime});
