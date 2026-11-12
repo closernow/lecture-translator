@@ -155,6 +155,9 @@ body.hasRef #btnBook{display:inline-block}
 .srct mark.qhl{background:#6b5a14;color:#fff3c4;border-radius:3px;padding:0 2px}
 .srct{position:relative;display:none;flex-basis:100%;font-size:13px;line-height:1.5;color:var(--muted);border-left:3px solid #3a5a8a;padding:4px 8px;max-height:40vh;overflow-y:auto}
 .srct.show{display:block}
+.rtab{border-collapse:collapse;margin:4px 0;font-size:inherit;line-height:1.4}
+.rtab th,.rtab td{border:1px solid #3a4a60;padding:2px 6px;vertical-align:top;text-align:left}
+.rtab th{background:rgba(58,90,138,.25);font-weight:600}
 .nosrc{font-size:12px;color:#d8a24a}
 
 /* panels */
@@ -464,7 +467,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/6 17:00';
+const APP_VER = '11/11 23:58';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2497,8 +2500,34 @@ function srcText(t, qs){
   let sp = null;
   for (const q of qs) if ((sp = quoteSpan(t, q))) break;
   if (!sp) for (const q of qs.slice(1)) if ((sp = quoteSpan(t, q, 0.45))) break;
-  const br = x => esc(x).replace(/\n/g, '<br>');
-  return sp ? br(t.slice(0, sp[0])) + '<mark class="qhl">' + br(t.slice(sp[0], sp[1])) + '</mark>' + br(t.slice(sp[1])) : br(t);
+  return richText(t, (a, b) => {
+    if (!sp || b <= sp[0] || a >= sp[1]) return esc(t.slice(a, b));
+    const x = Math.max(a, sp[0]), y = Math.min(b, sp[1]);
+    return esc(t.slice(a, x)) + '<mark class="qhl">' + esc(t.slice(x, y)) + '</mark>' + esc(t.slice(y, b));
+  });
+}
+// 原文按行显示；连着两行以上带 " | " 的是表格（整理好的课本全文里表格一行写成 "a | b | c"，第一行是表头），画成表格
+// part(a, b)：原文 t 第 a 到 b 个字的 HTML（各自加高亮）
+function richText(t, part){
+  t = String(t || '');
+  const L = []; let i = 0;
+  for (const l of t.split('\n')){ L.push([i, l]); i += l.length + 1; }
+  const row = k => k >= 0 && k < L.length && L[k][1].includes(' | ');
+  const out = []; let k = 0, br = false;
+  while (k < L.length){
+    if (row(k) && (row(k + 1) || row(k - 1))){
+      let h = '<table class="rtab">';
+      for (let r = 0; row(k); k++, r++){
+        const [s, l] = L[k]; const tag = r ? 'td' : 'th'; let c0 = 0; h += '<tr>';
+        for (const c of l.split(' | ')){ h += `<${tag}>${part(s + c0, s + c0 + c.length)}</${tag}>`; c0 += c.length + 3; }
+        h += '</tr>';
+      }
+      out.push(h + '</table>'); br = false;
+    } else {
+      out.push((br ? '<br>' : '') + part(L[k][0], L[k][0] + L[k][1].length)); br = true; k++;
+    }
+  }
+  return out.join('');
 }
 function srcHtml(rec){
   if (!rec) return '';
@@ -2511,7 +2540,7 @@ document.addEventListener('click', e => {
   e.stopPropagation();
   const t = b.nextElementSibling; if (!t) return;
   t.classList.toggle('show');
-  const mk = t.querySelector('mark.qhl'); if (mk && t.classList.contains('show')) t.scrollTop = Math.max(0, mk.offsetTop - 30);
+  const mk = t.querySelector('mark.qhl'); if (mk && t.classList.contains('show')) t.scrollTop = Math.max(0, t.scrollTop + mk.getBoundingClientRect().top - t.getBoundingClientRect().top - 30);   // 标记可能在表格里，offsetTop 不准
 }, true);
 async function refImport(file){
   let buf = new Uint8Array(await file.arrayBuffer());
@@ -2585,7 +2614,8 @@ $('#refList').addEventListener('click', async e => {
 });
 // 查书：不用 AI，直接搜原文
 function refHL(t, qs){
-  return String(t).split(/([A-Za-z]+|\d+(?:\.\d+)*)/).map((w, i) => i % 2 && qs.has(refTok(w)[0]) ? `<mark>${esc(w)}</mark>` : esc(w)).join('').replace(/\n/g, '<br>');
+  t = String(t);
+  return richText(t, (a, b) => t.slice(a, b).split(/([A-Za-z]+|\d+(?:\.\d+)*)/).map((w, i) => i % 2 && qs.has(refTok(w)[0]) ? `<mark>${esc(w)}</mark>` : esc(w)).join(''));
 }
 function bookRender(){
   const q = $('#bookQ').value.trim(), box = $('#bookList');
