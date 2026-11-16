@@ -467,7 +467,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/11 23:58';
+const APP_VER = '11/16 13:04';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -3736,9 +3736,11 @@ $('#btnDelete').onclick = async () => {
   $('#pSession').classList.remove('show'); renderHistory();
 };
 const safeName = s => s.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_');
+// 只有手机/平板走系统分享；电脑上 Chrome/Edge 也说能分享，但 Windows 的分享窗口一闪就关、报"取消"，什么都没存下来（11/16），所以电脑直接下载
+const IS_MOBILE = /iPhone|iPad|iPod|Android/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 async function shareOrDownload(blob, filename){
   const file = new File([blob], filename, {type:blob.type});
-  if (navigator.canShare && navigator.canShare({files:[file]})){
+  if (IS_MOBILE && navigator.canShare && navigator.canShare({files:[file]})){
     try { await navigator.share({files:[file]}); return; } catch(e){ if (e.name === 'AbortError') return; }
   }
   shareDownload(blob, filename);
