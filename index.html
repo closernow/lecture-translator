@@ -146,6 +146,7 @@ body.hasRef #btnBook{display:inline-block}
 .refc{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;background:var(--panel)}
 .refh{font-weight:600;font-size:14px;margin-bottom:6px}
 .reft{font-size:15px;line-height:1.55}
+.refc{background:#161b22}
 .reft mark{background:#5a4a12;color:inherit;border-radius:3px;padding:0 1px}
 .muted{color:var(--muted);font-weight:normal}
 .row.refrow{flex-wrap:nowrap}
@@ -153,7 +154,28 @@ body.hasRef #btnBook{display:inline-block}
 .srcs{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start}
 .srcb{font-size:13px;padding:4px 8px;border-radius:8px;color:#9fc6ff}
 .srct mark.qhl{background:#6b5a14;color:#fff3c4;border-radius:3px;padding:0 2px}
-.srct{position:relative;display:none;flex-basis:100%;font-size:13px;line-height:1.5;color:var(--muted);border-left:3px solid #3a5a8a;padding:4px 8px;max-height:40vh;overflow-y:auto}
+.srct{position:relative;display:none;flex-basis:100%;border-left:3px solid #3a5a8a;border-radius:0 8px 8px 0;background:#161b22;padding:10px 14px;max-height:50vh;overflow-y:auto}
+/* 原文按书的样子排（richText / bkHead）：衬线字、段距、列表缩进、图题、提示框 */
+.bk{font-family:Georgia,'Times New Roman','Songti SC',serif;font-size:15px;line-height:1.6;color:#ddd8cc}
+.bk>div{margin:0 0 .6em}
+.bk>div:last-child{margin-bottom:0}
+.bk-li,.bk-ol{margin:0 0 .3em !important;padding-left:1.4em;text-indent:-1em}
+.bk-li::before{content:'•';display:inline-block;width:1em;text-indent:0;color:#8aa4c8}
+.bk-ol{padding-left:2em;text-indent:-1.6em}
+.bk-ol2{padding-left:3.8em}
+.bk-n{display:inline-block;min-width:1.6em;text-indent:0;color:#8aa4c8}
+.bk-fig{font-family:-apple-system,system-ui,sans-serif;font-size:13px;font-weight:600;color:#9fb0c4;margin-top:.9em !important}
+.bk-figl,.bk-cr{font-family:-apple-system,system-ui,sans-serif;font-size:12px;color:#7d8896}
+.bk-cr{font-style:italic}
+.bk-note{border:1px solid #6b5520;background:rgba(160,120,30,.12);border-radius:6px;padding:6px 10px}
+.bk-note b{color:#f0c060}
+.bk-cl{color:#9fc6ff}
+.bk-tw{overflow-x:auto;margin:.4em 0 .8em !important}
+.bk .rtab{font-family:-apple-system,system-ui,sans-serif;font-size:13px}
+.bk-hd{margin-bottom:.7em;padding-bottom:.5em;border-bottom:1px solid #2c3644}
+.bk-ch{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#7d8896}
+.bk-ti{font-family:Georgia,'Times New Roman',serif;font-size:18px;font-weight:700;color:#eee8dc;line-height:1.3;margin:2px 0}
+.bk-pg{font-size:12px;color:#7d8896}
 .srct.show{display:block}
 .rtab{border-collapse:collapse;margin:4px 0;font-size:inherit;line-height:1.4}
 .rtab th,.rtab td{border:1px solid #3a4a60;padding:2px 6px;vertical-align:top;text-align:left}
@@ -467,7 +489,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/16 13:04';
+const APP_VER = '11/17 01:57';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2506,32 +2528,55 @@ function srcText(t, qs){
     return esc(t.slice(a, x)) + '<mark class="qhl">' + esc(t.slice(x, y)) + '</mark>' + esc(t.slice(y, b));
   });
 }
-// 原文按行显示；连着两行以上带 " | " 的是表格（整理好的课本全文里表格一行写成 "a | b | c"，第一行是表头），画成表格
+// 原文按书的样子排：一行一段（段距）、• 列表、1) a) i) 编号、Figure/Table 图题、Courtesy 出处、Caution/Note 提示框、
+// 条款号加粗、"术语: 解释" 的术语加粗；连着两行以上带 " | " 的是表格（第一行表头）。资料里的文字不带 markdown 记号，全靠这些行的样子判断
 // part(a, b)：原文 t 第 a 到 b 个字的 HTML（各自加高亮）
 function richText(t, part){
   t = String(t || '');
   const L = []; let i = 0;
   for (const l of t.split('\n')){ L.push([i, l]); i += l.length + 1; }
   const row = k => k >= 0 && k < L.length && L[k][1].includes(' | ');
-  const out = []; let k = 0, br = false;
+  const out = []; let k = 0, prevFig = false, lastLet = '';
   while (k < L.length){
     if (row(k) && (row(k + 1) || row(k - 1))){
-      let h = '<table class="rtab">';
+      let h = '<div class="bk-tw"><table class="rtab">';
       for (let r = 0; row(k); k++, r++){
         const [s, l] = L[k]; const tag = r ? 'td' : 'th'; let c0 = 0; h += '<tr>';
-        for (const c of l.split(' | ')){ h += `<${tag}>${part(s + c0, s + c0 + c.length)}</${tag}>`; c0 += c.length + 3; }
+        for (const c of l.split(' | ')){ h += `<${tag}>${c === '–' && r ? '' : part(s + c0, s + c0 + c.length)}</${tag}>`; c0 += c.length + 3; }
         h += '</tr>';
       }
-      out.push(h + '</table>'); br = false;
-    } else {
-      out.push((br ? '<br>' : '') + part(L[k][0], L[k][0] + L[k][1].length)); br = true; k++;
+      out.push(h + '</table></div>'); prevFig = false; continue;
     }
+    const [s, l] = L[k]; k++;
+    const e = s + l.length, tr = l.trim(); if (!tr){ continue; }
+    let m, cls = 'bk-p', html;
+    if ((m = l.match(/^(\s*[•·-]\s+)/))){ cls = 'bk-li'; html = part(s + m[1].length, e); }
+    else if ((m = l.match(/^(\s*(?:\d{1,2}|[a-z]|[ivx]{1,4})\)\s*)/))){
+      const n = m[1].trim().slice(0, -1);   // 罗马数字（ii、iv；i 前一项不是 h 时）是 a) b) 下面的一层，再缩进
+      const roman = /^[ivx]+$/.test(n) && (n.length > 1 || lastLet !== 'h' || !/[;.]\s*$/.test(L[k - 2] ? L[k - 2][1] : ''));   // h) 后面的 i)：h) 没说完（"…unless"）就是子项
+      if (/^[a-z]$/.test(n) && !roman) lastLet = n;
+      cls = roman ? 'bk-ol bk-ol2' : 'bk-ol'; html = `<span class="bk-n">${part(s, s + m[1].length)}</span>${part(s + m[1].length, e)}`; }
+    else if (/^(Figure|Table)\s+[A-Z]?\d/.test(tr)){ cls = 'bk-fig'; html = part(s, e); }
+    else if (prevFig && !/[.!?:]$/.test(tr) && (tr.includes('; ') || tr.split(/\s+/).length <= 8)){ cls = 'bk-figl'; html = part(s, e); }   // 图题后面紧跟的图上的字（"Flow; Flow"、"Series loop"）
+    else if (/^(Courtesy of|Reproduced (by|with)|Adapted (from|with)|Source:)/i.test(tr)){ cls = 'bk-cr'; html = part(s, e); }
+    else if ((m = l.match(/^(\s*(?:Caution|Warning|Danger|Important|Note|Special Note)\b[!:]?)/i))){ cls = 'bk-note'; html = `<b>${part(s, s + m[1].length)}</b>${part(s + m[1].length, e)}`;
+      if (tr.length <= m[1].trim().length + 1 && k < L.length && L[k][1].trim() && !row(k)){ html += ' ' + part(L[k][0], L[k][0] + L[k][1].length); k++; } }   // 只有 "Caution!" 一个词：下一行是它的内容，收进同一个框
+    else if ((m = l.match(/^((?:[A-O]\.)?\d{1,2}(?:\.\d{1,2}){1,4})(\s)/))){ html = `<b class="bk-cl">${part(s, s + m[1].length)}</b>${part(s + m[1].length, e)}`; }
+    else if ((m = l.match(/^([A-Z][^:.;]{1,70}?):\s/)) && m[1].split(' ').length <= 9){ html = `<b>${part(s, s + m[1].length + 1)}</b>${part(s + m[1].length + 1, e)}`; }
+    else html = part(s, e);
+    prevFig = cls === 'bk-fig' || (prevFig && (cls === 'bk-figl' || cls === 'bk-cr'));
+    out.push(`<div class="${cls}">${html}</div>`);
   }
-  return out.join('');
+  return '<div class="bk">' + out.join('') + '</div>';
+}
+// 原文顶上像书一样的标题：章（小字）+ 小节标题；规范的 s 是条款号，标题用 h（8.14 Vent and chimney termination）
+function bkHead(x){
+  const clause = isClause(x.s), title = clause ? (x.h || '') : (x.s || ''), chap = clause ? '' : (x.h && x.h !== x.s ? x.h : '');
+  return `<div class="bk-hd">${chap ? `<div class="bk-ch">${esc(chap)}</div>` : ''}${title ? `<div class="bk-ti">${esc(title)}</div>` : ''}<div class="bk-pg">${esc(clause ? refLabel(x) : x.b + (x.p ? ' 第 ' + x.p + ' 页' : ''))}</div></div>`;
 }
 function srcHtml(rec){
   if (!rec) return '';
-  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct"><b>${esc(refLabel(x))}</b>${x.h && x.h !== x.s ? ' · ' + esc(x.h) : ''}<br>${srcText(x.t || '', [x.q, rec.quote].concat(rec.src.map(y => y.q)))}</div>`).join('') + '</div>';
+  if (rec.src && rec.src.length) return '<div class="srcs">' + rec.src.map(x => `<button class="srcb">📖 ${esc(refLabel(x))}</button><div class="srct">${bkHead(x)}${srcText(x.t || '', [x.q, rec.quote].concat(rec.src.map(y => y.q)))}</div>`).join('') + '</div>';
   if (rec.nosrc) return '<div class="srcs"><span class="nosrc">⚠ 没查到出处</span></div>';
   return '';
 }
@@ -2622,7 +2667,7 @@ function bookRender(){
   if (!REF.docs.length){ box.innerHTML = '<div class="hint">还没有资料。在电脑上打开这个网页 → 设置 → 资料 → 导入资料。</div>'; return; }
   if (!q){ box.innerHTML = `<div class="hint">输入英文关键词或条款号，比如 vent flat roof、gas meter clearance、8.14.2。<br>现有资料：${REF.books.map(b => esc(b.name)).join('、')}</div>`; return; }
   const r = refSearch(q, 20), qs = new Set(refTok(q));
-  box.innerHTML = r.length ? r.map(x => `<div class="refc"><div class="refh">📖 ${esc(refLabel({b:x.d.b, s:x.d.c.s, p:x.d.c.p}))}<span class="muted">${x.d.c.h && x.d.c.h !== x.d.c.s ? ' · ' + esc(x.d.c.h) : ''}</span></div><div class="reft">${refHL(x.d.c.t, qs)}</div></div>`).join('')
+  box.innerHTML = r.length ? r.map(x => `<div class="refc"><div class="reft">${bkHead({b:x.d.b, s:x.d.c.s, p:x.d.c.p, h:x.d.c.h})}${refHL(x.d.c.t, qs)}</div></div>`).join('')
     : '<div class="hint">没搜到。换个说法试试（用英文，规范原文是英文）</div>';
   box.scrollTop = 0;
 }
