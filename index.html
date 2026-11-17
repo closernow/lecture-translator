@@ -155,6 +155,9 @@ body.hasRef #btnBook{display:inline-block}
 .srcb{font-size:13px;padding:4px 8px;border-radius:8px;color:#9fc6ff}
 .srct mark.qhl{background:#6b5a14;color:#fff3c4;border-radius:3px;padding:0 2px}
 .srct{position:relative;display:none;flex-basis:100%;border-left:3px solid #3a5a8a;border-radius:0 8px 8px 0;background:#161b22;padding:10px 14px;max-height:50vh;overflow-y:auto}
+/* 查书和出处框只能上下滚：手指斜着滑不把整块带出屏幕；只在词间换行（anywhere 会把表格里 3.8 拆开），宽表格在 .bk-tw 里自己左右滑 */
+#bookList,.srct{overflow-x:hidden;overscroll-behavior-x:none;overflow-wrap:break-word}
+.srct{min-width:0;max-width:100%}
 /* 原文按书的样子排（richText / bkHead）：衬线字、段距、列表缩进、图题、提示框 */
 .bk{font-family:Georgia,'Times New Roman','Songti SC',serif;font-size:15px;line-height:1.6;color:#ddd8cc}
 .bk>div{margin:0 0 .6em}
@@ -489,7 +492,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/17 01:57';
+const APP_VER = '11/17 17:44';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
