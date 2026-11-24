@@ -37,7 +37,10 @@ a{color:#7fb7ff}
 #top button{padding:8px 12px}
 
 /* subtitles */
-#subs{flex:1;overflow-y:auto;padding:16px 18px 30px;-webkit-overflow-scrolling:touch;touch-action:manipulation}  /* 双击句子是"提示"，别让 iPad 双击放大 */
+#subs{flex:1;overflow-y:auto;padding:16px 18px 30px;-webkit-overflow-scrolling:touch;touch-action:manipulation}  /* 别让 iPad 双击放大 */
+/* 上课时长按句子是"提示"：关掉 iPad 长按出的选字和"拷贝/查询"菜单（历史记录不受影响） */
+#subs{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+#subs .line.press{background:#24364d;border-radius:8px;box-shadow:0 0 0 4px #24364d;transition:background .35s,box-shadow .35s}
 .empty{color:var(--muted);text-align:center;margin-top:30vh;line-height:1.8}
 .line{margin:0 0 18px}
 .line .t{font-size:11px;color:#56606b;font-variant-numeric:tabular-nums}
@@ -492,7 +495,7 @@ const PROVIDERS = [
 ];
 
 // 版本号：每次上线改成上线时间（主页标题旁、设置页标题旁、复制的日志开头都显示），用来确认 iPad 上是不是新版
-const APP_VER = '11/17 17:44';
+const APP_VER = '11/23 22:27';
 document.querySelectorAll('.ver').forEach(e => e.textContent = APP_VER);
 const DEFAULTS = {
   keys:{dg:'', groq:'', gemini:'', sf:''},
@@ -2358,9 +2361,16 @@ function typeTick(){
 // 跟随最新：只有手指/鼠标滚动才算"我在往回看"，程序自己滚动不算。
 // 往回看时一直停在那里（以前 12 秒没碰就自动跳回，正看着被拉走），点"回到最新"或自己滑到底才接着跟
 let touchAt = 0, newSince = 0;
-['touchstart', 'touchmove', 'wheel', 'mousedown'].forEach(ev => $('#subs').addEventListener(ev, () => { touchAt = Date.now(); }, {passive:true}));
+const LP = {down:false, t:0, x:0, y:0, el:null, l:null, fired:false};   // 长按句子（见 pickLine）
+['touchstart', 'touchmove', 'touchend', 'wheel', 'mousedown', 'mouseup'].forEach(ev => $('#subs').addEventListener(ev, () => { touchAt = Date.now(); }, {passive:true}));
+// 真的在滑（手指移动、滚轮、拖滚动条）才记 moveAt；只是按住句子不算，不然卡片打开时字幕区变矮的那下滚动会被当成"往回看"
+let moveAt = 0, tY0 = 0, tX0 = 0;
+$('#subs').addEventListener('touchstart', e => { const t = e.touches[0]; if (t){ tX0 = t.clientX; tY0 = t.clientY; } }, {passive:true});
+$('#subs').addEventListener('touchmove', e => { const t = e.touches[0]; if (!t || Math.hypot(t.clientX - tX0, t.clientY - tY0) > 10) moveAt = Date.now(); }, {passive:true});
+$('#subs').addEventListener('wheel', () => { moveAt = Date.now(); }, {passive:true});
+$('#subs').addEventListener('mousedown', e => { if (!e.target.closest('.line')) moveAt = Date.now(); }, {passive:true});
 $('#subs').addEventListener('scroll', () => {
-  if (Date.now() - touchAt > 1500) return;
+  if (Date.now() - moveAt > 1500) return;
   const b = $('#subs');
   setStick(b.scrollTop + b.clientHeight >= b.scrollHeight - 60);
 });
@@ -2722,7 +2732,8 @@ const courseOf = id => COURSES.find(c => c.id === id) || COURSES[0];
 const Q_RE = /\?|^\W*(what|why|how|which|who|when|where|can|could|does|do|did|is|are|was|were|should|would|will|anyone|anybody|somebody|tell me|name|give me|explain)\b/i;
 const lineText = l => sureText((l.en || '') + (l.status === 'live' && l.im ? ' ' + l.im : ''));
 // 手指刚碰过字幕（3 秒内），答案卡片开着时字幕先别自动往上滚，免得点的那句被推走
-const askHold = () => ASK.open && Date.now() - touchAt < 3000;
+// 手指按着字幕、或松开不到 2.5 秒：字幕先别自动往上滚（提示开没开都一样），免得要按的那句被推走
+const askHold = () => LP.down || Date.now() - touchAt < 2500;
 function pickQuestion(){
   const ls = L.lines, n = ls.length; if (!n) return [];
   let i = -1;
@@ -2769,7 +2780,7 @@ function askOpen(v){
   $('#askBox').classList.toggle('show', v); $('#subs').classList.toggle('asking', v);
   askMini(false);
   if (!v){ clearTimeout(ASK.timer); clearTimeout(ASK.mini); if (ASK.ac) ASK.ac.abort(); ASK.sel = []; ASK.last = null; showSel(); }
-  if (stick){ const b = $('#subs'); b.scrollTop = b.scrollHeight; }
+  if (stick && !askHold()){ const b = $('#subs'); b.scrollTop = b.scrollHeight; }
 }
 // 拆答案：SHORT（老格式叫 EN）、中文、DETAIL（详细）；不按格式来的整段当中文显示
 function parseAns(s){
@@ -3006,24 +3017,50 @@ function askFit(){ const b = $('#subs'); if (stick && !askHold()) b.scrollTop = 
 if (window.ResizeObserver) new ResizeObserver(askFit).observe($('#subs'));
 // 点字幕上的句子（上课中，提示开没开都行）：
 // - 这句之前问过 → 直接显示那次的答案，不重新问
-// - 提示没开 → 双击才打开，问这句（前半句没说完的自动连上）
+// - 提示没开 → 长按才打开，问这句（前半句没说完的自动连上）
 // - 提示开着：点选中部分两头是去掉；点别的句子一律换成问它所在的问题（不再和刚才的连在一起，以前猜"要不要连"常猜错）
 //   问题没选全（拖了三行）就点卡片上的"＋上一句""＋下一句"
 //   停手 0.8 秒再问。只有调整选中范围才替换刚才那条，换成别的问题就是新的一条
-let tapLine = 0, tapAt = 0;
-$('#subs').addEventListener('click', e => {
+// 长按（约 0.45 秒）一句 = 问它 / 调整选中。按下那一刻手指下是哪句就算哪句，之后字幕怎么挪都不影响
+// 按住时手指挪了超过 10 像素 = 在滑字幕，不算；单击不理（以前双击，字幕一滚两下常点到两句）；电脑上鼠标双击也行
+function lpLine(e){
+  if (L.state === 'idle' && !ASK.open) return null;
+  const el = e.target.closest && e.target.closest('#subs .line'); if (!el) return null;
+  const l = L.lines.find(x => 'ln' + x.id === el.id); return l && lineText(l) ? {el, l} : null;
+}
+function lpEnd(){
+  clearTimeout(LP.t); LP.down = false;
+  if (LP.el) LP.el.classList.remove('press'); LP.el = null;
+  touchAt = Date.now();
+  clearTimeout(LP.fit); LP.fit = setTimeout(askFit, 2600);   // 停滚时间到了，接着跟最新
+}
+$('#subs').addEventListener('pointerdown', e => {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const h = lpLine(e); LP.fired = false; if (!h) return;
+  LP.down = true; LP.x = e.clientX; LP.y = e.clientY; LP.el = h.el; LP.l = h.l;
+  touchAt = Date.now();
+  h.el.classList.add('press');
+  clearTimeout(LP.t); LP.t = setTimeout(() => {
+    if (!LP.down) return;
+    const l = LP.l; LP.fired = true; lpEnd(); LP.down = false;
+    pickLine(l);
+  }, 450);
+});
+$('#subs').addEventListener('pointermove', e => {
+  if (LP.down && Math.hypot(e.clientX - LP.x, e.clientY - LP.y) > 10) lpEnd();
+});
+['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => $('#subs').addEventListener(ev, () => { if (LP.down) lpEnd(); }));
+$('#subs').addEventListener('contextmenu', e => { if (LP.fired || LP.down) e.preventDefault(); });
+$('#subs').addEventListener('dblclick', e => {
+  if (!window.matchMedia || !matchMedia('(hover:hover) and (pointer:fine)').matches) return;   // 只给电脑鼠标用
+  const h = lpLine(e); if (h) pickLine(h.l);
+});
+function pickLine(l){
   if (L.state === 'idle' && !ASK.open) return;
-  const el = e.target.closest('.line'); if (!el) return;
-  const l = L.lines.find(x => 'ln' + x.id === el.id); if (!l || !lineText(l)) return;
   if (!PROVIDERS.some(p => S.enabled[p.id] && (S.keys[p.keyName] || '').trim())){ toast('先在设置里填翻译用的 key'); return; }
   const old = qaOf(l);
   if (!ASK.open){
-    // 提示没开时要双击（0.4 秒内点同一句两下）才问，单击不理，免得看字幕时误触
-    const now = Date.now(), dbl = tapLine === l.id && now - tapAt < 400;
-    tapLine = l.id; tapAt = now;
-    if (!dbl) return;
-    tapLine = 0;
-    askOpen(true);
+    askOpen(true); lpShow(l);
     if (old){ showRec(old); return; }
     ASK.sel = qAround(L.lines.indexOf(l)); ASK.auto = false; showSel(); askNow(false); return;
   }
@@ -3033,7 +3070,11 @@ $('#subs').addEventListener('click', e => {
   if (s.includes(l)){ if (s.length > 1 && (l === s[0] || l === s[s.length - 1])) ASK.sel = s.filter(x => x !== l); else return; }
   else { ASK.sel = qAround(k); adjust = false; }
   selAsk(adjust);
-});
+}
+// 卡片打开后字幕区变矮，按的那句可能被卡片挡住：挪到看得见的地方（只挪必要的那一点）
+function lpShow(l){
+  requestAnimationFrame(() => { const el = document.getElementById('ln' + l.id); if (el && el.scrollIntoView) el.scrollIntoView({block:'nearest'}); });
+}
 // 选中范围变了：停手 0.8 秒再问。只有调整范围才替换刚才那条，别的是新的一条
 function selAsk(adjust){
   // 只有调整范围才替换刚才那条；换成别的问题一律是新的一条（以前"提示按钮自动选的 1 分钟内换题就替换"，把选对了的答案也顶掉了，点回去只能重问）
